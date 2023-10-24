@@ -280,6 +280,7 @@ fn make_named_method_table(info: NamedMethodTable) -> TokenStream {
     quote! {
         #imports
 
+        #[derive(Clone)]
         #[allow(non_snake_case)]
         pub struct #table_name {
             #( #method_decls )*
@@ -378,6 +379,7 @@ fn make_method_table(info: IndexedMethodTable) -> TokenStream {
 
         type FetchFn = <#fetch_fptr_type as crate::Inner>::FnPtr;
 
+        #[derive(Clone)]
         pub struct #table_name {
             function_pointers: Vec<#fptr_type>,
         }
