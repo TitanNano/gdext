@@ -270,3 +270,51 @@ impl PropertyInfo {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct MethodInfo {
+    pub id: i32,
+    pub method_name: StringName,
+    pub class_name: ClassName,
+    pub return_type: PropertyInfo,
+    pub arguments: Vec<PropertyInfo>,
+    pub default_arguments: Vec<Variant>,
+    pub flags: global::MethodFlags,
+}
+
+impl MethodInfo {
+    pub fn method_sys(&self) -> sys::GDExtensionMethodInfo {
+        use crate::obj::EngineEnum as _;
+
+        let argument_count = self.arguments.len() as u32;
+        let argument_vec = self
+            .arguments
+            .iter()
+            .map(|arg| arg.property_sys())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
+        let arguments = unsafe { (*Box::into_raw(argument_vec)).as_mut_ptr() };
+
+        let default_argument_count = self.default_arguments.len() as u32;
+        let default_argument_vec = self
+            .default_arguments
+            .iter()
+            .map(|arg| arg.var_sys())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
+        let default_arguments = unsafe { (*Box::into_raw(default_argument_vec)).as_mut_ptr() };
+
+        sys::GDExtensionMethodInfo {
+            id: self.id,
+            name: self.method_name.string_sys(),
+            return_value: self.return_type.property_sys(),
+            argument_count,
+            arguments,
+            default_argument_count,
+            default_arguments,
+            flags: u32::try_from(self.flags.ord()).expect("flags should be valid"),
+        }
+    }
+}
