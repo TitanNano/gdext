@@ -74,11 +74,12 @@ pub use toolbox::*;
 #[derive(Debug)]
 pub enum ClassApiLevel {
     Server,
-    Scene,
     Editor,
+    Scene,
 }
 
-struct GodotBinding {
+#[derive(Clone)]
+pub struct GodotBinding {
     interface: GDExtensionInterface,
     library: GDExtensionClassLibraryPtr,
     global_method_table: BuiltinLifecycleTable,
@@ -89,12 +90,15 @@ struct GodotBinding {
     utility_function_table: UtilityFunctionTable,
     runtime_metadata: GdextRuntimeMetadata,
     config: GdextConfig,
+    compat: InitCompat,
 }
 
+#[derive(Clone)]
 struct GdextRuntimeMetadata {
     godot_version: GDExtensionGodotVersion,
 }
 
+#[derive(Clone)]
 pub struct GdextConfig {
     pub tool_only_in_editor: bool,
     pub is_editor: cell::OnceCell<bool>,
@@ -172,6 +176,7 @@ pub unsafe fn initialize(
         library,
         runtime_metadata,
         config,
+        compat,
     });
     out!("Assigned binding.");
 
@@ -189,6 +194,18 @@ pub unsafe fn initialize(
             .to_str()
             .expect("unknown Godot version")
     );
+}
+
+pub unsafe fn init_with_existing_binding(binding: GodotBinding) {
+    BINDING = Some(binding);
+}
+
+pub unsafe fn get_ffi_init() -> (InitCompat, GDExtensionClassLibraryPtr) {
+    let binding = BINDING
+        .as_ref()
+        .expect("binding has to be initialized before calling get_ffi_binding");
+
+    (binding.compat, binding.library)
 }
 
 /// # Safety

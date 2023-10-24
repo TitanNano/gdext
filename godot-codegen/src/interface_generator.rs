@@ -81,6 +81,7 @@ fn generate_proc_address_funcs(h_path: &Path) -> TokenStream {
 
         pub use compat_4_1::InitCompat;
 
+        #[derive(Clone)]
         pub struct GDExtensionInterface {
             #( #fptr_decls )*
         }
