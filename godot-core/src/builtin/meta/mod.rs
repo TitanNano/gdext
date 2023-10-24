@@ -263,3 +263,50 @@ impl PropertyInfo {
         }
     }
 }
+
+#[derive(Debug)]
+pub struct MethodInfo {
+    pub id: i32,
+    pub method_name: StringName,
+    pub class_name: ClassName,
+    pub return_type: VariantType,
+    pub arguments: Vec<PropertyInfo>,
+    pub default_arguments: Vec<Variant>,
+    pub flags: global::MethodFlags,
+}
+
+impl MethodInfo {
+    pub fn method_sys(&self) -> sys::GDExtensionMethodInfo {
+        use crate::obj::EngineEnum as _;
+
+        sys::GDExtensionMethodInfo {
+            id: self.id,
+            name: self.method_name.string_sys(),
+            return_value: sys::GDExtensionPropertyInfo {
+                type_: self.return_type.sys(),
+                name: self.method_name.string_sys(),
+                class_name: self.class_name.string_sys(),
+                hint: u32::try_from(global::PropertyHint::PROPERTY_HINT_NONE.ord())
+                    .expect("hint.ord()"),
+                hint_string: GodotString::new().string_sys(),
+                usage: u32::try_from(global::PropertyUsageFlags::PROPERTY_USAGE_NONE.ord())
+                    .expect("usage.ord()"),
+            },
+            argument_count: self.arguments.len() as u32,
+            arguments: self
+                .arguments
+                .iter()
+                .map(|arg| arg.property_sys())
+                .collect::<Vec<_>>()
+                .as_mut_ptr(),
+            default_argument_count: self.default_arguments.len() as u32,
+            default_arguments: self
+                .default_arguments
+                .iter()
+                .map(|arg| arg.var_sys())
+                .collect::<Vec<_>>()
+                .as_mut_ptr(),
+            flags: u32::try_from(self.flags.ord()).expect("flags should be valid"),
+        }
+    }
+}
