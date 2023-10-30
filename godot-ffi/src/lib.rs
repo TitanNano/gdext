@@ -79,6 +79,7 @@ pub enum ClassApiLevel {
 }
 
 #[derive(Clone)]
+#[repr(C)]
 pub struct GodotBinding {
     interface: GDExtensionInterface,
     library: GDExtensionClassLibraryPtr,
@@ -200,12 +201,11 @@ pub unsafe fn init_with_existing_binding(binding: GodotBinding) {
     BINDING = Some(binding);
 }
 
-pub unsafe fn get_ffi_init() -> (InitCompat, GDExtensionClassLibraryPtr) {
-    let binding = BINDING
+pub unsafe fn get_binding() -> GodotBinding {
+    BINDING
         .as_ref()
-        .expect("binding has to be initialized before calling get_ffi_binding");
-
-    (binding.compat, binding.library)
+        .expect("binding has to be initialized before calling get_binding")
+        .to_owned()
 }
 
 /// # Safety
