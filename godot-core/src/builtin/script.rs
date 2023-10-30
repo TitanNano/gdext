@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{cell::RefCell, rc::Rc};
 
 use godot_ffi::{
     get_interface, GDExtensionCallErrorType, GDExtensionScriptInstanceDataPtr,
@@ -23,7 +23,7 @@ pub trait ScriptInstance {
     fn property_list(&self) -> Rc<Vec<PropertyInfo>>;
     fn method_list(&self) -> Rc<Vec<MethodInfo>>;
     fn call(
-        &self,
+        &mut self,
         method: StringName,
         args: &[&Variant],
     ) -> Result<Variant, GDExtensionCallErrorType>;
@@ -62,11 +62,11 @@ impl<T: ScriptInstance + ?Sized> ScriptInstance for Box<T> {
     }
 
     fn call(
-        &self,
+        &mut self,
         method: StringName,
         args: &[&Variant],
     ) -> Result<Variant, GDExtensionCallErrorType> {
-        self.as_ref().call(method, args)
+        self.as_mut().call(method, args)
     }
 
     fn get_script(&self) -> Gd<Script> {
@@ -111,7 +111,7 @@ impl<T: ScriptInstance + ?Sized> ScriptInstance for Box<T> {
 }
 
 struct ScriptInstanceData<T: ScriptInstance> {
-    inner: T,
+    inner: RefCell<T>,
 }
 
 pub fn create_script_instance<T: ScriptInstance>(rs_instance: T) -> GDExtensionScriptInstancePtr {
@@ -146,7 +146,9 @@ pub fn create_script_instance<T: ScriptInstance>(rs_instance: T) -> GDExtensionS
         set_fallback_func: None,
     };
 
-    let data = ScriptInstanceData { inner: rs_instance };
+    let data = ScriptInstanceData {
+        inner: RefCell::new(rs_instance),
+    };
 
     let inst = unsafe {
         let data_ptr = Box::into_raw(Box::new(data));
@@ -173,11 +175,11 @@ mod script_instance_info {
         force_mut_ptr, GDExtensionBool, GDExtensionCallError, GDExtensionConstStringNamePtr,
         GDExtensionConstVariantPtr, GDExtensionInt, GDExtensionMethodInfo, GDExtensionObjectPtr,
         GDExtensionPropertyInfo, GDExtensionScriptInstanceDataPtr, GDExtensionScriptLanguagePtr,
-        GDExtensionStringNamePtr, GDExtensionStringPtr, GDExtensionTypePtr, GDExtensionVariantPtr,
-        GDExtensionVariantType, GodotFfi, PtrcallType, GDEXTENSION_CALL_OK,
+        GDExtensionStringPtr, GDExtensionTypePtr, GDExtensionVariantPtr, GDExtensionVariantType,
+        GodotFfi, PtrcallType, GDEXTENSION_CALL_OK,
     };
 
-    use crate::builtin::{StringName, Variant};
+    use crate::builtin::{meta::GodotType, StringName, Variant};
 
     use super::{ScriptInstance, ScriptInstanceData};
 
@@ -187,12 +189,11 @@ mod script_instance_info {
         p_value: GDExtensionConstVariantPtr,
     ) -> GDExtensionBool {
         let instance = p_instance as *mut ScriptInstanceData<T>;
-        let name = StringName::from_string_sys(force_mut_ptr(p_name));
+        let name = StringName::from_arg_ptr(p_name as GDExtensionTypePtr, PtrcallType::Standard);
         let value = &*Variant::ptr_from_sys(force_mut_ptr(p_value));
 
-        let result = (*instance).inner.set(name.clone(), value) as u8;
+        let result = (*instance).inner.borrow_mut().set(name.clone(), value) as u8;
 
-        mem::forget(name);
         result
     }
 
@@ -202,10 +203,11 @@ mod script_instance_info {
         r_ret: GDExtensionVariantPtr,
     ) -> GDExtensionBool {
         let instance = p_instance as *const ScriptInstanceData<T>;
-        let name = StringName::from_string_sys(force_mut_ptr(p_name));
+        let name = StringName::from_arg_ptr(p_name as GDExtensionTypePtr, PtrcallType::Standard);
 
         let result = (*instance)
             .inner
+            .borrow()
             .get(name.clone())
             .map(|variant| {
                 variant.move_return_ptr(
@@ -213,11 +215,9 @@ mod script_instance_info {
                     godot_ffi::PtrcallType::Standard,
                 )
             })
-            .is_some()
-            .sys() as u8;
+            .is_some();
 
-        mem::forget(name);
-        result
+        result as u8
     }
 
     pub(super) unsafe extern "C" fn get_property_list_func<T: ScriptInstance>(
@@ -228,6 +228,7 @@ mod script_instance_info {
 
         let property_list: Vec<_> = (*instance)
             .inner
+            .borrow()
             .property_list()
             .iter()
             .map(|prop| prop.property_sys())
@@ -248,6 +249,7 @@ mod script_instance_info {
 
         let method_list: Vec<_> = (*instance)
             .inner
+            .borrow()
             .method_list()
             .iter()
             .map(|method| method.method_sys())
@@ -265,7 +267,7 @@ mod script_instance_info {
         p_prop_info: *const GDExtensionPropertyInfo,
     ) {
         let instance = p_instance as *const ScriptInstanceData<T>;
-        let length = (*instance).inner.property_list().len();
+        let length = (*instance).inner.borrow().property_list().len();
 
         let vec = Vec::from_raw_parts(p_prop_info as *mut GDExtensionPropertyInfo, length, length);
 
@@ -280,15 +282,20 @@ mod script_instance_info {
         r_return: GDExtensionVariantPtr,
         r_error: *mut GDExtensionCallError,
     ) {
-        let instance = p_self as *const ScriptInstanceData<T>;
-        let method = StringName::from_string_sys(p_method as GDExtensionStringNamePtr);
+        let instance = p_self as *mut ScriptInstanceData<T>;
+        let method =
+            StringName::from_arg_ptr(p_method as GDExtensionTypePtr, PtrcallType::Standard);
 
         let args: Vec<_> = slice::from_raw_parts(p_args, p_argument_count as usize)
             .iter()
             .map(|ptr| &*Variant::ptr_from_sys(force_mut_ptr(*ptr)))
             .collect();
 
-        match (*instance).inner.call(method.clone(), args.as_slice()) {
+        match (*instance)
+            .inner
+            .borrow_mut()
+            .call(method.clone(), args.as_slice())
+        {
             Ok(ret) => {
                 ret.move_return_ptr(r_return as GDExtensionTypePtr, PtrcallType::Virtual);
                 (*r_error).error = GDEXTENSION_CALL_OK;
@@ -296,8 +303,6 @@ mod script_instance_info {
 
             Err(err) => (*r_error).error = err,
         };
-
-        mem::forget(method);
     }
 
     pub(super) unsafe extern "C" fn get_script_func<T: ScriptInstance>(
@@ -305,7 +310,12 @@ mod script_instance_info {
     ) -> GDExtensionObjectPtr {
         let instance = p_instance as *const ScriptInstanceData<T>;
 
-        (*instance).inner.get_script().raw.sys() as GDExtensionObjectPtr
+        let script = (*instance).inner.borrow().get_script();
+        let ptr = script.obj_sys();
+
+        mem::forget(script.into_ffi());
+
+        ptr
     }
 
     pub(super) unsafe extern "C" fn is_placeholder_func<T: ScriptInstance>(
@@ -313,7 +323,7 @@ mod script_instance_info {
     ) -> u8 {
         let instance = p_instance as *const ScriptInstanceData<T>;
 
-        (*instance).inner.is_placeholder() as u8
+        (*instance).inner.borrow().is_placeholder() as u8
     }
 
     pub(super) unsafe extern "C" fn has_method_func<T: ScriptInstance>(
@@ -321,11 +331,10 @@ mod script_instance_info {
         p_method: GDExtensionConstStringNamePtr,
     ) -> u8 {
         let instance = p_instance as *const ScriptInstanceData<T>;
-        let method = StringName::from_string_sys(p_method as GDExtensionStringNamePtr);
+        let method =
+            StringName::from_arg_ptr(p_method as GDExtensionTypePtr, PtrcallType::Standard);
 
-        let result = (*instance).inner.has_method(method.clone()) as u8;
-
-        mem::forget(method);
+        let result = (*instance).inner.borrow().has_method(method.clone()) as u8;
 
         result
     }
@@ -335,38 +344,58 @@ mod script_instance_info {
         p_method_info: *const GDExtensionMethodInfo,
     ) {
         let instance = p_instance as *const ScriptInstanceData<T>;
-        let length = (*instance).inner.method_list().len();
+        let length = (*instance).inner.borrow().method_list().len();
 
         let vec = Vec::from_raw_parts(force_mut_ptr(p_method_info), length, length);
 
-        drop(vec);
+        vec.into_iter().for_each(|method_info| {
+            Vec::from_raw_parts(
+                method_info.arguments,
+                method_info.argument_count as usize,
+                method_info.argument_count as usize,
+            );
+
+            Vec::from_raw_parts(
+                method_info.default_arguments,
+                method_info.default_argument_count as usize,
+                method_info.default_argument_count as usize,
+            );
+        })
     }
 
     pub(super) unsafe extern "C" fn get_property_type_func<T: ScriptInstance>(
         p_instance: GDExtensionScriptInstanceDataPtr,
         p_name: GDExtensionConstStringNamePtr,
-        _r_is_valid: *mut GDExtensionBool,
+        r_is_valid: *mut GDExtensionBool,
     ) -> GDExtensionVariantType {
         let instance = p_instance as *const ScriptInstanceData<T>;
-        let name = StringName::from_string_sys(p_name as GDExtensionStringNamePtr);
+        let name = StringName::from_arg_ptr(p_name as GDExtensionTypePtr, PtrcallType::Standard);
 
-        let result = (*instance).inner.get_property_type(name.clone());
+        let result = (*instance).inner.borrow().get_property_type(name.clone());
 
-        mem::forget(name);
-
+        *r_is_valid = true as u8;
         result.sys()
     }
 
     pub(super) unsafe extern "C" fn to_string_func<T: ScriptInstance>(
         p_instance: GDExtensionScriptInstanceDataPtr,
-        _r_is_valid: *mut GDExtensionBool,
+        r_is_valid: *mut GDExtensionBool,
         r_str: GDExtensionStringPtr,
     ) {
         let instance = p_instance as *const ScriptInstanceData<T>;
 
-        let result = (*instance).inner.to_string();
+        let Ok(inner) = (*instance).inner.try_borrow() else {
+            // to_string of a script instance can be called when calling to_string
+            // on the owning base object.
 
-        result.move_return_ptr(r_str as GDExtensionTypePtr, PtrcallType::Standard);
+            return;
+        };
+
+        *r_is_valid = true as u8;
+
+        inner
+            .to_string()
+            .move_return_ptr(r_str as GDExtensionTypePtr, PtrcallType::Standard);
     }
 
     pub(super) unsafe extern "C" fn get_owner_func<T: ScriptInstance>(
@@ -374,7 +403,7 @@ mod script_instance_info {
     ) -> GDExtensionObjectPtr {
         let instance = p_instance as *const ScriptInstanceData<T>;
 
-        let owner = (*instance).inner.owner();
+        let owner = (*instance).inner.borrow().owner();
 
         let ptr = owner.obj_sys();
 
@@ -394,14 +423,13 @@ mod script_instance_info {
         >,
         data: *mut c_void,
     ) {
-        let add_prop = match add_prop {
-            Some(func) => func,
-            None => return,
+        let Some(add_prop) = add_prop else {
+            return;
         };
 
         let instance = p_instance as *mut ScriptInstanceData<T>;
 
-        let props = (*instance).inner.property_state();
+        let props = (*instance).inner.borrow().property_state();
 
         props.into_iter().for_each(|(name, value)| {
             add_prop(name.string_sys(), value.var_sys(), data);
@@ -416,8 +444,8 @@ mod script_instance_info {
     ) -> GDExtensionScriptLanguagePtr {
         let instance = p_instance as *mut ScriptInstanceData<T>;
 
-        let language = (*instance).inner.language();
-        let ptr = language.raw.sys() as GDExtensionScriptLanguagePtr;
+        let language = (*instance).inner.borrow().language().into_ffi();
+        let ptr = language.sys() as GDExtensionScriptLanguagePtr;
 
         mem::forget(language);
         ptr
@@ -436,7 +464,7 @@ mod script_instance_info {
     ) -> GDExtensionBool {
         let instance = p_instance as *mut ScriptInstanceData<T>;
 
-        (*instance).inner.refcount_decremented() as u8
+        (*instance).inner.borrow().refcount_decremented() as u8
     }
 
     pub(super) unsafe extern "C" fn refcount_incremented_func<T: ScriptInstance>(
@@ -444,6 +472,6 @@ mod script_instance_info {
     ) {
         let instance = p_instance as *mut ScriptInstanceData<T>;
 
-        (*instance).inner.refcount_incremented()
+        (*instance).inner.borrow().refcount_incremented()
     }
 }

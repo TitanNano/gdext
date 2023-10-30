@@ -269,7 +269,7 @@ pub struct MethodInfo {
     pub id: i32,
     pub method_name: StringName,
     pub class_name: ClassName,
-    pub return_type: VariantType,
+    pub return_type: PropertyInfo,
     pub arguments: Vec<PropertyInfo>,
     pub default_arguments: Vec<Variant>,
     pub flags: global::MethodFlags,
@@ -279,33 +279,34 @@ impl MethodInfo {
     pub fn method_sys(&self) -> sys::GDExtensionMethodInfo {
         use crate::obj::EngineEnum as _;
 
+        let argument_count = self.arguments.len() as u32;
+        let argument_vec = self
+            .arguments
+            .iter()
+            .map(|arg| arg.property_sys())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
+        let arguments = unsafe { (*Box::into_raw(argument_vec)).as_mut_ptr() };
+
+        let default_argument_count = self.default_arguments.len() as u32;
+        let default_argument_vec = self
+            .default_arguments
+            .iter()
+            .map(|arg| arg.var_sys())
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
+
+        let default_arguments = unsafe { (*Box::into_raw(default_argument_vec)).as_mut_ptr() };
+
         sys::GDExtensionMethodInfo {
             id: self.id,
             name: self.method_name.string_sys(),
-            return_value: sys::GDExtensionPropertyInfo {
-                type_: self.return_type.sys(),
-                name: self.method_name.string_sys(),
-                class_name: self.class_name.string_sys(),
-                hint: u32::try_from(global::PropertyHint::PROPERTY_HINT_NONE.ord())
-                    .expect("hint.ord()"),
-                hint_string: GodotString::new().string_sys(),
-                usage: u32::try_from(global::PropertyUsageFlags::PROPERTY_USAGE_NONE.ord())
-                    .expect("usage.ord()"),
-            },
-            argument_count: self.arguments.len() as u32,
-            arguments: self
-                .arguments
-                .iter()
-                .map(|arg| arg.property_sys())
-                .collect::<Vec<_>>()
-                .as_mut_ptr(),
-            default_argument_count: self.default_arguments.len() as u32,
-            default_arguments: self
-                .default_arguments
-                .iter()
-                .map(|arg| arg.var_sys())
-                .collect::<Vec<_>>()
-                .as_mut_ptr(),
+            return_value: self.return_type.property_sys(),
+            argument_count,
+            arguments,
+            default_argument_count,
+            default_arguments,
             flags: u32::try_from(self.flags.ord()).expect("flags should be valid"),
         }
     }
