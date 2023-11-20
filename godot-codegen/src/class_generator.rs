@@ -391,6 +391,8 @@ fn make_class_doc(
         godot_ty.to_ascii_lowercase()
     );
 
+    let trait_name = class_name.virtual_trait_name();
+
     format!(
         "Godot class `{godot_ty}.`\n\n\
         \
@@ -398,7 +400,7 @@ fn make_class_doc(
         \
         Related symbols:\n\n\
         {sidecar_line}\
-        * [`{rust_ty}Virtual`][crate::engine::{rust_ty}Virtual]: virtual methods\n\
+        * [`{trait_name}`][crate::engine::{trait_name}]: virtual methods\n\
         {notify_line}\
         \n\n\
         See also [Godot docs for `{godot_ty}`]({online_link}).\n\n",
@@ -439,19 +441,24 @@ fn make_module_doc(class_name: &TyName) -> String {
     )
 }
 
-fn make_constructor(class: &Class, ctx: &Context) -> TokenStream {
+fn make_constructor_and_default(
+    class: &Class,
+    class_name: &TyName,
+    ctx: &Context,
+) -> (TokenStream, TokenStream) {
     let godot_class_name = &class.name;
     let godot_class_stringname = make_string_name(godot_class_name);
     // Note: this could use class_name() but is not yet done due to upcoming lazy-load refactoring.
     //let class_name_obj = quote! { <Self as crate::obj::GodotClass>::class_name() };
 
+    let (constructor, godot_default_impl);
     if ctx.is_singleton(godot_class_name) {
         // Note: we cannot return &'static mut Self, as this would be very easy to mutably alias.
         // &'static Self would be possible, but we would lose the whole mutability information (even if that is best-effort and
         // not strict Rust mutability, it makes the API much more usable).
         // As long as the user has multiple Gd smart pointers to the same singletons, only the internal raw pointers are aliased.
         // See also Deref/DerefMut impl for Gd.
-        quote! {
+        constructor = quote! {
             pub fn singleton() -> Gd<Self> {
                 unsafe {
                     let __class_name = #godot_class_stringname;
@@ -459,13 +466,15 @@ fn make_constructor(class: &Class, ctx: &Context) -> TokenStream {
                     Gd::from_obj_sys(__object_ptr)
                 }
             }
-        }
+        };
+        godot_default_impl = TokenStream::new();
     } else if !class.is_instantiable {
         // Abstract base classes or non-singleton classes without constructor
-        TokenStream::new()
+        constructor = TokenStream::new();
+        godot_default_impl = TokenStream::new();
     } else if class.is_refcounted {
         // RefCounted, Resource, etc
-        quote! {
+        constructor = quote! {
             pub fn new() -> Gd<Self> {
                 unsafe {
                     let class_name = #godot_class_stringname;
@@ -473,10 +482,17 @@ fn make_constructor(class: &Class, ctx: &Context) -> TokenStream {
                     Gd::from_obj_sys(object_ptr)
                 }
             }
-        }
+        };
+        godot_default_impl = quote! {
+            impl crate::obj::cap::GodotDefault for #class_name {
+                fn __godot_default() -> crate::obj::Gd<Self> {
+                    Self::new()
+                }
+            }
+        };
     } else {
         // Manually managed classes: Object, Node etc
-        quote! {
+        constructor = quote! {
             #[must_use]
             pub fn new_alloc() -> Gd<Self> {
                 unsafe {
@@ -485,8 +501,11 @@ fn make_constructor(class: &Class, ctx: &Context) -> TokenStream {
                     Gd::from_obj_sys(object_ptr)
                 }
             }
-        }
+        };
+        godot_default_impl = TokenStream::new();
     }
+
+    (constructor, godot_default_impl)
 }
 
 fn make_class(class: &Class, class_name: &TyName, ctx: &mut Context) -> GeneratedClass {
@@ -504,7 +523,7 @@ fn make_class(class: &Class, class_name: &TyName, ctx: &mut Context) -> Generate
         None => (quote! { () }, None),
     };
 
-    let constructor = make_constructor(class, ctx);
+    let (constructor, godot_default_impl) = make_constructor_and_default(class, class_name, ctx);
     let api_level = util::get_api_level(class);
     let init_level = api_level.to_init_level();
 
@@ -638,7 +657,7 @@ fn make_class(class: &Class, class_name: &TyName, ctx: &mut Context) -> Generate
             )*
 
             #exportable_impl
-
+            #godot_default_impl
             #deref_impl
 
             #[macro_export]
@@ -1123,21 +1142,30 @@ fn make_class_method_definition(
     if special_cases::is_deleted(class_name, method, ctx) {
         return FnDefinition::none();
     }
-    /*if method.map_args(|args| args.is_empty()) {
-        // Getters (i.e. 0 arguments) will be stripped of their `get_` prefix, to conform to Rust convention
-        if let Some(remainder) = method_name.strip_prefix("get_") {
-            // TODO Do not apply for FileAccess::get_16, StreamPeer::get_u16, etc
-            if !remainder.chars().nth(0).unwrap().is_ascii_digit() {
-                method_name = remainder;
-            }
+
+    let class_name_str = &class_name.godot_ty;
+    let godot_method_name = &method.name;
+    let rust_method_name = special_cases::maybe_renamed(class_name, godot_method_name);
+
+    // Override const-qualification for known special cases (FileAccess::get_16, StreamPeer::get_u16, etc.).
+    /* TODO enable this once JSON/domain models are separated. Remove #[allow] above.
+    let mut override_is_const = None;
+    if let Some(override_const) = special_cases::is_method_const(class_name, &method) {
+        override_is_const = Some(override_const);
+    }
+
+    // Getters in particular are re-qualified as const (if there isn't already an override).
+    if override_is_const.is_none() && option_as_slice(&method.arguments).is_empty() {
+        if rust_method_name.starts_with("get_") {
+            // Many getters are mutably qualified (GltfAccessor::get_max, CameraAttributes::get_exposure_multiplier, ...).
+            // As a default, set those to const.
+            override_is_const = Some(true);
         }
     }*/
 
-    let class_name_str = &class_name.godot_ty;
-    let method_name_str = special_cases::maybe_renamed(class_name, &method.name);
-
     let receiver = make_receiver(
         method.is_static,
+        //override_is_const.unwrap_or(method.is_const),
         method.is_const,
         quote! { self.object_ptr },
     );
@@ -1159,7 +1187,7 @@ fn make_class_method_definition(
         quote! {
             fptr_by_key(sys::lazy_keys::ClassMethodKey {
                 class_name: #class_name_str,
-                method_name: #method_name_str,
+                method_name: #godot_method_name,
                 hash: #hash,
             })
         }
@@ -1173,7 +1201,7 @@ fn make_class_method_definition(
 
         <CallSig as PtrcallSignatureTuple>::out_class_ptrcall::<RetMarshal>(
             method_bind,
-            #method_name_str,
+            #rust_method_name,
             #object_ptr,
             #maybe_instance_id,
             args,
@@ -1185,7 +1213,7 @@ fn make_class_method_definition(
 
         <CallSig as VarcallSignatureTuple>::out_class_varcall(
             method_bind,
-            #method_name_str,
+            #rust_method_name,
             #object_ptr,
             #maybe_instance_id,
             args,
@@ -1195,9 +1223,9 @@ fn make_class_method_definition(
 
     make_function_definition(
         &FnSignature {
-            function_name: method_name_str,
+            function_name: rust_method_name,
             surrounding_class: Some(class_name),
-            is_private: special_cases::is_private(class_name, &method.name),
+            is_private: special_cases::is_private(class_name, godot_method_name),
             is_virtual: false,
             is_vararg: method.is_vararg,
             qualifier: FnQualifier::for_method(method.is_const, method.is_static),
@@ -1836,7 +1864,7 @@ fn special_virtual_methods(notification_enum_name: &Ident) -> TokenStream {
         ///
         /// Override this method to define how the instance is represented as a string.
         /// Used by `impl Display for Gd<T>`, as well as `str()` and `print()` in GDScript.
-        fn to_string(&self) -> crate::builtin::GodotString {
+        fn to_string(&self) -> crate::builtin::GString {
             unimplemented!()
         }
 
@@ -1897,8 +1925,8 @@ fn make_all_virtual_methods(
         all_virtuals.extend(
             get_methods_in_class(class)
                 .iter()
-                .cloned()
-                .filter(|m| m.is_virtual),
+                .filter(|m| m.is_virtual)
+                .cloned(),
         );
     };
 

@@ -461,7 +461,8 @@ impl<T: GodotClass> Drop for RawGd<T> {
     fn drop(&mut self) {
         // No-op for manually managed objects
 
-        out!("RawGd::drop   <{}>", std::any::type_name::<T>());
+        // out!("RawGd::drop   <{}>", std::any::type_name::<T>());
+
         // SAFETY: This `Gd` wont be dropped again after this.
         let is_last = unsafe { T::Mem::maybe_dec_ref(self) }; // may drop
         if is_last {
@@ -515,6 +516,10 @@ impl<T: GodotClass> GodotType for RawGd<T> {
 
     fn class_name() -> ClassName {
         T::class_name()
+    }
+
+    fn godot_type_name() -> String {
+        T::class_name().to_string()
     }
 }
 

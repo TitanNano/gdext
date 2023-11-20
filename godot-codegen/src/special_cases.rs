@@ -53,18 +53,10 @@ pub(crate) fn is_class_deleted(class_name: &TyName) -> bool {
 
     // OpenXR has not been available for macOS before 4.2.
     // See e.g. https://github.com/GodotVR/godot-xr-tools/issues/479.
+    // Do not hardcode a list of OpenXR classes, as more may be added in future Godot versions; instead use prefix.
     #[cfg(all(before_api = "4.2", target_os = "macos"))]
-    match class_name {
-        | "OpenXRHand"
-        | "OpenXRAction"
-        | "OpenXRActionMap"
-        | "OpenXRActionSet"
-        | "OpenXRInteractionProfile"
-        | "OpenXRIPBinding"
-        | "OpenXRInterface"
-
-          => return true,
-        _ => {}
+    if class_name.starts_with("OpenXR") {
+        return true;
     }
 
     // ThemeDB was previously loaded lazily
@@ -181,6 +173,39 @@ pub(crate) fn is_excluded_from_default_params(class_name: Option<&TyName>, godot
         | ("Object", "notification")
 
         => true, _ => false
+    }
+}
+
+/// Return `true` if a method should have `&self` receiver in Rust, `false` if `&mut self` and `None` if original qualifier should be kept.
+///
+/// In cases where the method falls under some general category (like getters) that have their own const-qualification overrides, `Some`
+/// should be returned to take precedence over general rules. Example: `FileAccess::get_pascal_string()` is mut, but would be const-qualified
+/// since it looks like a getter.
+#[rustfmt::skip]
+#[cfg(FALSE)] // TODO enable this once JSON/domain models are separated.
+pub(crate) fn is_method_const(class_name: &TyName, godot_method: &ClassMethod) -> Option<bool> {
+    match (class_name.godot_ty.as_str(), godot_method.name.as_str()) {
+        // Changed to mut.
+        | ("FileAccess", "get_16")
+        | ("FileAccess", "get_32")
+        | ("FileAccess", "get_64")
+        | ("FileAccess", "get_8")
+        | ("FileAccess", "get_csv_line")
+        | ("FileAccess", "get_real")
+        | ("FileAccess", "get_float")
+        | ("FileAccess", "get_double")
+        | ("FileAccess", "get_var")
+        | ("FileAccess", "get_line")
+        | ("FileAccess", "get_pascal_string") // already mut.
+        | ("StreamPeer", "get_8")
+        | ("StreamPeer", "get_16")
+        | ("StreamPeer", "get_32")
+        | ("StreamPeer", "get_64")
+        | ("StreamPeer", "get_float")
+        | ("StreamPeer", "get_double")
+        => Some(false),
+
+        _ => None,
     }
 }
 

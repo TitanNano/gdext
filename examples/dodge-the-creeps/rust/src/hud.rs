@@ -1,4 +1,4 @@
-use godot::engine::{Button, CanvasLayer, CanvasLayerVirtual, Label, Timer};
+use godot::engine::{Button, CanvasLayer, ICanvasLayer, Label, Timer};
 use godot::prelude::*;
 
 #[derive(GodotClass)]
@@ -14,7 +14,7 @@ impl Hud {
     fn start_game();
 
     #[func]
-    pub fn show_message(&self, text: GodotString) {
+    pub fn show_message(&self, text: GString) {
         let mut message_label = self.base.get_node_as::<Label>("MessageLabel");
         message_label.set_text(text);
         message_label.show();
@@ -61,7 +61,7 @@ impl Hud {
 }
 
 #[godot_api]
-impl CanvasLayerVirtual for Hud {
+impl ICanvasLayer for Hud {
     fn init(base: Base<Self::Base>) -> Self {
         Self { base }
     }

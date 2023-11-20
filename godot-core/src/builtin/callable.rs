@@ -53,6 +53,23 @@ impl Callable {
         }
     }
 
+    #[cfg(since_api = "4.2")]
+    fn default_callable_custom_info() -> sys::GDExtensionCallableCustomInfo {
+        sys::GDExtensionCallableCustomInfo {
+            callable_userdata: ptr::null_mut(),
+            token: ptr::null_mut(),
+            object_id: 0,
+            call_func: None,
+            is_valid_func: None, // could be customized, but no real use case yet.
+            free_func: None,
+            hash_func: None,
+            equal_func: None,
+            // Op < is only used in niche scenarios and default is usually good enough, see https://github.com/godotengine/godot/issues/81901.
+            less_than_func: None,
+            to_string_func: None,
+        }
+    }
+
     /// Create a callable from a Rust function or closure.
     ///
     /// `name` is used for the string representation of the closure, which helps debugging.
@@ -72,7 +89,7 @@ impl Callable {
     pub fn from_fn<F, S>(name: S, rust_function: F) -> Self
     where
         F: 'static + Send + Sync + FnMut(&[&Variant]) -> Result<Variant, ()>,
-        S: Into<crate::builtin::GodotString>,
+        S: Into<crate::builtin::GString>,
     {
         let userdata = CallableUserdata {
             inner: FnWrapper {
@@ -83,16 +100,10 @@ impl Callable {
 
         let info = sys::GDExtensionCallableCustomInfo {
             callable_userdata: Box::into_raw(Box::new(userdata)) as *mut std::ffi::c_void,
-            token: ptr::null_mut(),
-            object: ptr::null_mut(),
             call_func: Some(rust_callable_call_fn::<F>),
-            is_valid_func: None, // could be customized, but no real use case yet.
             free_func: Some(rust_callable_destroy::<FnWrapper<F>>),
-            hash_func: None,
-            equal_func: None,
-            // Op < is only used in niche scenarios and default is usually good enough, see https://github.com/godotengine/godot/issues/81901.
-            less_than_func: None,
             to_string_func: Some(rust_callable_to_string_named::<F>),
+            ..Self::default_callable_custom_info()
         };
 
         Self::from_custom_info(info)
@@ -110,16 +121,12 @@ impl Callable {
 
         let info = sys::GDExtensionCallableCustomInfo {
             callable_userdata: Box::into_raw(Box::new(userdata)) as *mut std::ffi::c_void,
-            token: ptr::null_mut(),
-            object: ptr::null_mut(),
             call_func: Some(rust_callable_call_custom::<C>),
-            is_valid_func: None, // could be customized, but no real use case yet.
             free_func: Some(rust_callable_destroy::<C>),
             hash_func: Some(rust_callable_hash::<C>),
             equal_func: Some(rust_callable_equal::<C>),
-            // Op < is only used in niche scenarios and default is usually good enough, see https://github.com/godotengine/godot/issues/81901.
-            less_than_func: None,
             to_string_func: Some(rust_callable_to_string_display::<C>),
+            ..Self::default_callable_custom_info()
         };
 
         Self::from_custom_info(info)
@@ -332,7 +339,7 @@ pub use custom_callable::RustCallable;
 #[cfg(since_api = "4.2")]
 mod custom_callable {
     use super::*;
-    use crate::builtin::GodotString;
+    use crate::builtin::GString;
     use std::hash::Hash;
 
     pub struct CallableUserdata<T> {
@@ -350,7 +357,7 @@ mod custom_callable {
 
     pub(crate) struct FnWrapper<F> {
         pub(crate) rust_function: F,
-        pub(crate) name: GodotString,
+        pub(crate) name: GString,
     }
 
     /// Represents a custom callable object defined in Rust.
@@ -432,7 +439,7 @@ mod custom_callable {
         r_out: sys::GDExtensionStringPtr,
     ) {
         let c: &T = CallableUserdata::inner_from_raw(callable_userdata);
-        let s = crate::builtin::GodotString::from(c.to_string());
+        let s = crate::builtin::GString::from(c.to_string());
 
         s.move_string_ptr(r_out);
         *r_is_valid = true as sys::GDExtensionBool;

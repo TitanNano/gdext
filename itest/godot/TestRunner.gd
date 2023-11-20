@@ -2,10 +2,19 @@
 # License, v. 2.0. If a copy of the MPL was not distributed with this
 # file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+@tool # To ensure that itest is not run from the editor; see below.
+
 extends Node
 class_name GDScriptTestRunner
 
 func _ready():
+	# Check that tests are invoked from the command line. Loading the editor may break some parts (e.g. generated test code).
+	# Both checks are needed (it's possible to invoke `godot -e --headless`).
+	if Engine.is_editor_hint() || DisplayServer.get_name() != 'headless':
+		push_error("Integration tests must be run in headless mode (without editor).")
+		get_tree().quit(2)
+		return
+
 	# Ensure physics is initialized, for tests that require it.
 	await get_tree().physics_frame
 
@@ -53,12 +62,15 @@ func _ready():
 			if method_name.begins_with("test_"):
 				gdscript_tests.push_back(await suite.run_test(suite, method_name))
 
+	var property_tests = load("res://gen/GenPropertyTests.gd").new()
+
 	var success: bool = rust_runner.run_all_tests(
 		gdscript_tests,
 		gdscript_suites.size(),
 		allow_focus,
 		self,
-		filters
+		filters,
+		property_tests
 	)
 
 	if success:
@@ -86,7 +98,7 @@ class GDScriptTestCase:
 		var script: GDScript = suite.get_script()
 		return str(script.resource_path.get_file().get_basename(), ".gd")
 
-# Standard test case used for whenever something can be tested by just running a gdscript function.
+# Standard test case used for whenever something can be tested by just running a GDScript function.
 class GDScriptExecutableTestCase extends GDScriptTestCase:
 	func run():
 		# This is a no-op if the suite doesn't have this property.

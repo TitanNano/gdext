@@ -27,7 +27,7 @@
 //!    `Copy` as well. They are implemented with the same memory layout as their counterparts in
 //!    Godot itself, and typically have public fields. <br><br>
 //!
-//! 2. **Copy-on-write types**: [`GodotString`][crate::builtin::GodotString],
+//! 2. **Copy-on-write types**: [`GString`][crate::builtin::GString],
 //!    [`StringName`][crate::builtin::StringName], and `Packed*Array` types.
 //!
 //!    These mostly act like value types, similar to Rust's own `Vec`. You can `Clone` them to get
@@ -214,11 +214,10 @@ pub mod prelude {
     pub use super::builtin::*;
     pub use super::builtin::{array, dict, varray}; // Re-export macros.
     pub use super::engine::{
-        load, try_load, utilities, AudioStreamPlayer, AudioStreamPlayerVirtual, Camera2D,
-        Camera2DVirtual, Camera3D, Camera3DVirtual, Input, Node, Node2D, Node2DVirtual, Node3D,
-        Node3DVirtual, NodeVirtual, Object, ObjectVirtual, PackedScene, PackedSceneExt,
-        PackedSceneVirtual, RefCounted, RefCountedVirtual, Resource, ResourceVirtual, SceneTree,
-        SceneTreeVirtual,
+        load, try_load, utilities, AudioStreamPlayer, Camera2D, Camera3D, GFile,
+        IAudioStreamPlayer, ICamera2D, ICamera3D, INode, INode2D, INode3D, IObject, IPackedScene,
+        IRefCounted, IResource, ISceneTree, Input, Node, Node2D, Node3D, Object, PackedScene,
+        PackedSceneExt, RefCounted, Resource, SceneTree,
     };
     pub use super::init::{gdextension, ExtensionLibrary, InitLevel};
     pub use super::log::*;
@@ -227,4 +226,5 @@ pub mod prelude {
     // Make trait methods available
     pub use super::engine::NodeExt as _;
     pub use super::obj::EngineEnum as _;
+    pub use super::obj::UserClass as _; // new_gd(), self_gd()
 }

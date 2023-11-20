@@ -15,6 +15,10 @@ use sys::{ffi_methods, interface_fn, GodotFfi};
 // FIXME remove dependency on these types
 use sys::{__GdextString, __GdextType};
 
+// TODO(bromeon): ensure and test that all element types can be packed.
+// Many builtin types don't have a #[repr] themselves, but they are used in packed arrays, which assumes certain size and alignment.
+// This is mostly a problem for as_slice(), which reinterprets the FFI representation into the "frontend" type like GString.
+
 /// Defines and implements a single packed array type. This macro is not hygienic and is meant to
 /// be used only in the current module.
 macro_rules! impl_packed_array {
@@ -96,7 +100,7 @@ macro_rules! impl_packed_array {
                         // SAFETY: Packed arrays are stored contiguously in memory, so we can use
                         // pointer arithmetic instead of going through `$operator_index_const` for
                         // every index.
-                        // Note that we do need to use `.clone()` because `GodotString` is refcounted;
+                        // Note that we do need to use `.clone()` because `GString` is refcounted;
                         // we can't just do a memcpy.
                         let element = unsafe { (*ptr.offset(offset)).clone() };
                         vec.push(element);
@@ -398,7 +402,7 @@ macro_rules! impl_packed_array {
                 for (i, element) in slice.iter().enumerate() {
                     // SAFETY: The array contains exactly `len` elements, stored contiguously in memory.
                     unsafe {
-                        // `GodotString` does not implement `Copy` so we have to call `.clone()`
+                        // `GString` does not implement `Copy` so we have to call `.clone()`
                         // here.
                         *ptr.offset(to_isize(i)) = element.clone();
                     }
@@ -567,10 +571,10 @@ impl_packed_array!(
 
 impl_packed_array!(
     type_name: PackedStringArray,
-    element_type: GodotString,
+    element_type: GString,
     opaque_type: OpaquePackedStringArray,
     inner_type: InnerPackedStringArray,
-    argument_type: GodotString,
+    argument_type: GString,
     return_type: __GdextString,
     from_array: packed_string_array_from_array,
     operator_index: packed_string_array_operator_index,

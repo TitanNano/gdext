@@ -9,7 +9,7 @@
 
 use crate::framework::itest;
 use godot::builtin::inner::{InnerColor, InnerString};
-use godot::engine::{FileAccess, HttpRequest, HttpRequestVirtual, Image};
+use godot::engine::{FileAccess, HttpRequest, IHttpRequest, Image};
 use godot::prelude::*;
 
 #[itest]
@@ -24,7 +24,7 @@ fn codegen_base_renamed() {
     // The registration is done at startup time, so it may already fail during GDExtension init.
     // Nevertheless, try to instantiate an object with base HttpRequest here.
 
-    let obj = Gd::with_base(|base| TestBaseRenamed { _base: base });
+    let obj = Gd::new(|base| TestBaseRenamed { _base: base });
     let _id = obj.instance_id();
 
     obj.free();
@@ -33,7 +33,7 @@ fn codegen_base_renamed() {
 #[itest]
 fn codegen_static_builtin_method() {
     let pi = InnerString::num(std::f64::consts::PI, 3);
-    assert_eq!(pi, GodotString::from("3.142"));
+    assert_eq!(pi, GString::from("3.142"));
 
     let col = InnerColor::html("#663399cc".into());
     assert_eq!(col, Color::from_rgba(0.4, 0.2, 0.6, 0.8));
@@ -82,11 +82,11 @@ impl TestBaseRenamed {
     fn with_mut(&self, mut param: i32) {}
 
     #[func]
-    fn with_many_unnamed(&self, _: i32, _: GodotString) {}
+    fn with_many_unnamed(&self, _: i32, _: GString) {}
 }
 
 #[godot_api]
-impl HttpRequestVirtual for TestBaseRenamed {
+impl IHttpRequest for TestBaseRenamed {
     fn init(base: Base<HttpRequest>) -> Self {
         TestBaseRenamed { _base: base }
     }

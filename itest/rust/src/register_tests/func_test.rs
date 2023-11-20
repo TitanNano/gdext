@@ -28,28 +28,28 @@ impl FuncRename {
     }
 
     #[func(rename=spell_static)]
-    fn renamed_static() -> GodotString {
-        GodotString::from("static")
+    fn renamed_static() -> GString {
+        GString::from("static")
     }
 
     #[cfg(all())]
-    fn returns_hello_world(&self) -> GodotString {
-        GodotString::from("Hello world!")
+    fn returns_hello_world(&self) -> GString {
+        GString::from("Hello world!")
     }
 
     #[cfg(any())]
-    fn returns_hello_world(&self) -> GodotString {
+    fn returns_hello_world(&self) -> GString {
         compile_error!("Removed by #[cfg]")
     }
 
     #[cfg(any())]
-    fn returns_bye_world(&self) -> GodotString {
+    fn returns_bye_world(&self) -> GString {
         compile_error!("Removed by #[cfg]")
     }
 
     #[cfg(all())]
-    fn returns_bye_world(&self) -> GodotString {
-        GodotString::from("Bye world!")
+    fn returns_bye_world(&self) -> GString {
+        GString::from("Bye world!")
     }
 }
 
@@ -210,7 +210,7 @@ impl GdSelfReference {
 }
 
 #[godot_api]
-impl RefCountedVirtual for GdSelfReference {
+impl IRefCounted for GdSelfReference {
     fn init(base: Base<Self::Base>) -> Self {
         Self {
             internal_value: 0,
@@ -224,8 +224,8 @@ impl RefCountedVirtual for GdSelfReference {
     }
 
     #[cfg(all())]
-    fn to_string(&self) -> GodotString {
-        GodotString::new()
+    fn to_string(&self) -> GString {
+        GString::new()
     }
 
     #[cfg(any())]
@@ -235,7 +235,7 @@ impl RefCountedVirtual for GdSelfReference {
 
     #[cfg(all())]
     fn on_notification(&mut self, _: godot::engine::notify::ObjectNotification) {
-        godot_print!("Hello!");
+        // Do nothing.
     }
 
     #[cfg(any())]
@@ -265,14 +265,14 @@ fn class_has_signal<T: GodotClass>(name: &str) -> bool {
 #[itest]
 fn cfg_doesnt_interfere_with_valid_method_impls() {
     // If we re-implement this method but the re-implementation is removed, that should keep the non-removed implementation.
-    let object = Gd::new(FuncRename);
+    let object = Gd::from_object(FuncRename);
     assert_eq!(
         object.bind().returns_hello_world(),
-        GodotString::from("Hello world!")
+        GString::from("Hello world!")
     );
     assert_eq!(
         object.bind().returns_bye_world(),
-        GodotString::from("Bye world!")
+        GString::from("Bye world!")
     );
 }
 

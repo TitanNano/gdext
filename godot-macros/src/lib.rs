@@ -230,11 +230,11 @@ use crate::util::ident;
 ///
 ///     // @export_file
 ///     #[export(file)]
-///     file: GodotString,
+///     file: GString,
 ///
 ///     // @export_file("*.gd")
 ///     #[export(file = "*.gd")]
-///     gdscript_file: GodotString,
+///     gdscript_file: GString,
 ///
 ///     // @export_flags_3d_physics
 ///     #[export(flags_3d_physics)]
@@ -376,11 +376,11 @@ pub fn derive_godot_class(input: TokenStream) -> TokenStream {
 ///
 /// // 2) trait impl block: implement Godot-specific APIs
 /// #[godot_api]
-/// impl NodeVirtual for MyClass { /* ... */ }
+/// impl INode for MyClass { /* ... */ }
 /// ```
 ///
-/// The second case works by implementing the corresponding trait `<Base>Virtual` for the base class of your class
-/// (for example `RefCountedVirtual` or `Node3DVirtual`). Then, you can add functionality such as:
+/// The second case works by implementing the corresponding trait `I<Base>` for the base class of your class
+/// (for example `IRefCounted` or `INode3D`). Then, you can add functionality such as:
 /// * `init` constructors
 /// * lifecycle methods like `ready` or `process`
 /// * `on_notification` method
@@ -408,7 +408,7 @@ pub fn derive_godot_class(input: TokenStream) -> TokenStream {
 /// }
 ///
 /// #[godot_api]
-/// impl RefCountedVirtual for MyStruct {
+/// impl IRefCounted for MyStruct {
 ///     fn init(_base: Base<RefCounted>) -> Self {
 ///         MyStruct
 ///     }
@@ -431,7 +431,7 @@ pub fn derive_godot_class(input: TokenStream) -> TokenStream {
 /// }
 ///
 /// #[godot_api]
-/// impl NodeVirtual for MyNode {
+/// impl INode for MyNode {
 ///     fn ready(&mut self) {
 ///         godot_print!("Hello World!");
 ///     }
