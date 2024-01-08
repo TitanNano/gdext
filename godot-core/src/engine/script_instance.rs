@@ -5,7 +5,6 @@
  * file, You can obtain one at https://mozilla.org/MPL/2.0/.
  */
 
-use std::cell::RefCell;
 use std::ffi::c_void;
 
 use crate::builtin::meta::{MethodInfo, PropertyInfo};
@@ -23,7 +22,7 @@ pub trait ScriptInstance {
     fn class_name(&self) -> GString;
 
     /// Property setter for Godots virtual dispatch system. The engine will call this function when it wants to change a property on the script.
-    fn set(&mut self, name: StringName, value: &Variant) -> bool;
+    fn set(&self, name: StringName, value: &Variant) -> bool;
 
     /// Property getter for Godots virtual dispatch system. The engine will call this function when it wants to read a property on the script.
     fn get(&self, name: StringName) -> Option<Variant>;
@@ -42,7 +41,7 @@ pub trait ScriptInstance {
     /// It's important that the script does not cause a second call to this function while executing a method call. This would result in a panic.
     // TODO: map the sys::GDExtensionCallErrorType to some public API type.
     fn call(
-        &mut self,
+        &self,
         method: StringName,
         args: &[&Variant],
     ) -> Result<Variant, sys::GDExtensionCallErrorType>;
@@ -85,7 +84,7 @@ pub trait ScriptInstance {
     fn property_get_fallback(&self, name: StringName) -> Option<Variant>;
 
     /// The engine may call this function if ScriptLanguage::is_placeholder_fallback_enabled is enabled.
-    fn property_set_fallback(&mut self, name: StringName, value: &Variant) -> bool;
+    fn property_set_fallback(&self, name: StringName, value: &Variant) -> bool;
 }
 
 impl<T: ScriptInstance + ?Sized> ScriptInstance for Box<T> {
@@ -93,8 +92,8 @@ impl<T: ScriptInstance + ?Sized> ScriptInstance for Box<T> {
         self.as_ref().class_name()
     }
 
-    fn set(&mut self, name: StringName, value: &Variant) -> bool {
-        self.as_mut().set(name, value)
+    fn set(&self, name: StringName, value: &Variant) -> bool {
+        self.as_ref().set(name, value)
     }
 
     fn get(&self, name: StringName) -> Option<Variant> {
@@ -110,11 +109,11 @@ impl<T: ScriptInstance + ?Sized> ScriptInstance for Box<T> {
     }
 
     fn call(
-        &mut self,
+        &self,
         method: StringName,
         args: &[&Variant],
     ) -> Result<Variant, sys::GDExtensionCallErrorType> {
-        self.as_mut().call(method, args)
+        self.as_ref().call(method, args)
     }
 
     fn get_script(&self) -> &Gd<Script> {
@@ -157,13 +156,13 @@ impl<T: ScriptInstance + ?Sized> ScriptInstance for Box<T> {
         self.as_ref().property_get_fallback(name)
     }
 
-    fn property_set_fallback(&mut self, name: StringName, value: &Variant) -> bool {
-        self.as_mut().property_set_fallback(name, value)
+    fn property_set_fallback(&self, name: StringName, value: &Variant) -> bool {
+        self.as_ref().property_set_fallback(name, value)
     }
 }
 
 struct ScriptInstanceData<T: ScriptInstance> {
-    inner: RefCell<T>,
+    inner: T,
     gd_instance_ptr: *mut sys::GDExtensionScriptInstanceInfo,
 }
 
@@ -216,7 +215,7 @@ pub fn create_script_instance<T: ScriptInstance>(rs_instance: T) -> *mut c_void 
     let instance_ptr = Box::into_raw(Box::new(gd_instance));
 
     let data = ScriptInstanceData {
-        inner: RefCell::new(rs_instance),
+        inner: rs_instance,
         gd_instance_ptr: instance_ptr,
     };
 
@@ -236,7 +235,6 @@ pub fn create_script_instance<T: ScriptInstance>(rs_instance: T) -> *mut c_void 
 
 mod script_instance_info {
     use std::any::type_name;
-    use std::cell::{BorrowError, Ref, RefMut};
     use std::ffi::c_void;
     use std::mem::ManuallyDrop;
     use std::ops::Deref;
@@ -248,20 +246,6 @@ mod script_instance_info {
     use crate::sys;
 
     use super::{ScriptInstance, ScriptInstanceData};
-
-    fn borrow_instance_mut<T: ScriptInstance>(instance: &ScriptInstanceData<T>) -> RefMut<'_, T> {
-        instance.inner.borrow_mut()
-    }
-
-    fn borrow_instance<T: ScriptInstance>(instance: &ScriptInstanceData<T>) -> Ref<'_, T> {
-        instance.inner.borrow()
-    }
-
-    fn try_borrow_instance<T: ScriptInstance>(
-        instance: &ScriptInstanceData<T>,
-    ) -> Result<Ref<'_, T>, BorrowError> {
-        instance.inner.try_borrow()
-    }
 
     /// # Safety
     ///
@@ -381,7 +365,7 @@ mod script_instance_info {
         let result = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance_mut(instance).set(name, value)
+            instance.inner.set(name, value)
         })
         // unwrapping to a default of false to indicate that the assignment as not handled by the script.
         .unwrap_or_default();
@@ -404,7 +388,7 @@ mod script_instance_info {
         let return_value = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance(instance).get(name.clone())
+            instance.inner.get(name.clone())
         });
 
         let result = match return_value {
@@ -430,7 +414,8 @@ mod script_instance_info {
         let property_list = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            let property_list: Vec<_> = borrow_instance(instance)
+            let property_list: Vec<_> = instance
+                .inner
                 .get_property_list()
                 .iter()
                 .map(|prop| prop.property_sys())
@@ -459,7 +444,8 @@ mod script_instance_info {
         let method_list = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            let method_list: Vec<_> = borrow_instance(instance)
+            let method_list: Vec<_> = instance
+                .inner
                 .get_method_list()
                 .iter()
                 .map(|method| method.method_sys())
@@ -493,7 +479,7 @@ mod script_instance_info {
         let length = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance(instance).get_property_list().len()
+            instance.inner.get_property_list().len()
         })
         .unwrap_or_default();
 
@@ -524,7 +510,8 @@ mod script_instance_info {
 
         let result = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_self);
-            borrow_instance_mut(instance).call(method.clone(), args)
+
+            instance.inner.call(method.clone(), args)
         });
 
         match result {
@@ -553,7 +540,7 @@ mod script_instance_info {
         let script = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance(instance).get_script().to_owned()
+            instance.inner.get_script().to_owned()
         });
 
         match script {
@@ -574,7 +561,7 @@ mod script_instance_info {
         let is_placeholder = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance(instance).is_placeholder()
+            instance.inner.is_placeholder()
         })
         .unwrap_or_default();
 
@@ -595,7 +582,7 @@ mod script_instance_info {
         let has_method = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance(instance).has_method(method.clone())
+            instance.inner.has_method(method.clone())
         })
         .unwrap_or_default();
 
@@ -615,7 +602,7 @@ mod script_instance_info {
         let length = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance(instance).get_method_list().len()
+            instance.inner.get_method_list().len()
         })
         .unwrap_or_default();
 
@@ -656,7 +643,7 @@ mod script_instance_info {
         let result = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance(instance).get_property_type(name.clone())
+            instance.inner.get_property_type(name.clone())
         });
 
         let Some(result) = result else {
@@ -683,21 +670,8 @@ mod script_instance_info {
         let string = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            let Ok(inner) = try_borrow_instance(instance) else {
-                // to_string of a script instance can be called when calling to_string on the owning base object. In this case we pretend like we
-                // can't handle the call and leave r_is_valid at it's default value of false.
-                //
-                // This is one of the  only members of GDExtensionScripInstanceInfo which appeares to be called from an API function
-                // (beside get_func, set_func, call_func). The unexpected behavior here is that it is being called as a replacement of Godots
-                // Object::to_string for the owner object. This then also happens when trying to call to_string on the base object inside a
-                // script, which feels wrong, and most importantly, would obviously cause a panic when acquiring the Ref guard.
-
-                return None;
-            };
-
-            Some(inner.to_string())
-        })
-        .flatten();
+            instance.inner.to_string()
+        });
 
         let Some(string) = string else {
             return;
@@ -728,7 +702,7 @@ mod script_instance_info {
         let property_states = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance(instance).get_property_state()
+            instance.inner.get_property_state()
         })
         .unwrap_or_default();
 
@@ -748,7 +722,7 @@ mod script_instance_info {
         let language = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance(instance).get_language()
+            instance.inner.get_language()
         });
 
         let Some(language) = language else {
@@ -784,7 +758,7 @@ mod script_instance_info {
         let result = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance(instance).on_refcount_decremented()
+            instance.inner.on_refcount_decremented()
         })
         .unwrap_or(true);
 
@@ -807,7 +781,7 @@ mod script_instance_info {
         handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance(instance).on_refcount_incremented();
+            instance.inner.on_refcount_incremented();
         })
         .unwrap_or_default();
     }
@@ -834,7 +808,7 @@ mod script_instance_info {
         let return_value = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance(instance).property_get_fallback(name)
+            instance.inner.property_get_fallback(name)
         });
 
         let result = match return_value {
@@ -869,7 +843,7 @@ mod script_instance_info {
         let result = handle_panic(ctx, || {
             let instance = instance_data_as_script_instance::<T>(p_instance);
 
-            borrow_instance_mut(instance).property_set_fallback(name, value)
+            instance.inner.property_set_fallback(name, value)
         })
         .unwrap_or_default();
 
