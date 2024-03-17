@@ -182,4 +182,5 @@ const SELECTED_CLASSES: &[&str] = &[
     "Timer",
     "Viewport",
     "Window",
+    "WeakRef",
 ];

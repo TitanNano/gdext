@@ -25,3 +25,4 @@ trace = ["godot-core/trace"]
 [dependencies]
 godot-core = { path = "../godot-core" }
 godot-macros = { path = "../godot-macros" }
+godot-cell = { path = "../godot-cell" }

@@ -6,17 +6,20 @@
  */
 
 use std::ffi::c_void;
+use std::pin::Pin;
 
 use godot::builtin::meta::{ClassName, FromGodot, MethodInfo, PropertyInfo, ToGodot};
 use godot::builtin::{GString, StringName, Variant, VariantType};
 use godot::engine::global::{MethodFlags, PropertyHint, PropertyUsageFlags};
+use godot::engine::utilities::weakref;
 use godot::engine::{
     create_script_instance, IScriptExtension, Object, Script, ScriptExtension, ScriptInstance,
-    ScriptLanguage,
+    ScriptLanguage, WeakRef,
 };
 use godot::obj::{Base, Gd, WithBaseField};
 use godot::register::{godot_api, GodotClass};
 use godot::sys;
+use godot::GdCell;
 
 #[derive(GodotClass)]
 #[class(base = ScriptExtension, init)]
@@ -26,8 +29,8 @@ struct TestScript {
 
 #[godot_api]
 impl IScriptExtension for TestScript {
-    unsafe fn instance_create(&self, _for_object: Gd<Object>) -> *mut c_void {
-        create_script_instance(TestScriptInstance::new(self.to_gd().upcast()))
+    unsafe fn instance_create(&self, for_object: Gd<Object>) -> *mut c_void {
+        create_script_instance(TestScriptInstance::new(self.to_gd().upcast(), for_object))
     }
 
     fn can_instantiate(&self) -> bool {
@@ -41,12 +44,14 @@ struct TestScriptInstance {
     prop_list: Vec<PropertyInfo>,
     method_list: Vec<MethodInfo>,
     script: Gd<Script>,
+    owner: Gd<WeakRef>,
 }
 
 impl TestScriptInstance {
-    fn new(script: Gd<Script>) -> Self {
+    fn new(script: Gd<Script>, owner: Gd<Object>) -> Self {
         Self {
             script,
+            owner: weakref(owner.to_variant()).to(),
             script_property_b: false,
             prop_list: vec![PropertyInfo {
                 variant_type: VariantType::Int,
@@ -92,40 +97,59 @@ impl TestScriptInstance {
             }],
         }
     }
+
+    /// Turns the internal owner weakref into a strong ref.
+    fn owner(&self) -> Gd<Object> {
+        self.owner.get_ref().to()
+    }
+
+    /// Method of the test script and will be called during test runs.
+    fn script_method_a(&self, arg_a: GString, arg_b: i32) -> String {
+        format!("{arg_a}{arg_b}")
+    }
+
+    fn script_method_toggle_property_b(&mut self) -> bool {
+        self.script_property_b = !self.script_property_b;
+        true
+    }
 }
 
 impl ScriptInstance for TestScriptInstance {
-    fn class_name(&self) -> GString {
+    fn class_name(_this: Pin<&GdCell<Self>>) -> GString {
         GString::from("TestScript")
     }
 
-    fn set_property(&mut self, name: StringName, value: &Variant) -> bool {
+    fn set_property(this: Pin<&GdCell<Self>>, name: StringName, value: &Variant) -> bool {
         if name.to_string() == "script_property_b" {
-            self.script_property_b = FromGodot::from_variant(value);
+            this.borrow_mut().unwrap().script_property_b = FromGodot::from_variant(value);
             true
         } else {
             false
         }
     }
 
-    fn get_property(&self, name: StringName) -> Option<Variant> {
+    fn get_property(this: Pin<&GdCell<Self>>, name: StringName) -> Option<Variant> {
         match name.to_string().as_str() {
             "script_property_a" => Some(Variant::from(10)),
-            "script_property_b" => Some(Variant::from(self.script_property_b)),
+            "script_property_b" => Some(Variant::from(this.borrow().unwrap().script_property_b)),
             _ => None,
         }
     }
 
-    fn get_property_list(&self) -> &[PropertyInfo] {
-        &self.prop_list
+    fn get_property_list(this: Pin<&GdCell<Self>>) -> Box<[PropertyInfo]> {
+        let guard = this.borrow().unwrap();
+
+        guard.prop_list.as_slice().into()
     }
 
-    fn get_method_list(&self) -> &[MethodInfo] {
-        &self.method_list
+    fn get_method_list(this: Pin<&GdCell<Self>>) -> Box<[MethodInfo]> {
+        let guard = this.borrow().unwrap();
+
+        guard.method_list.as_slice().into()
     }
 
     fn call(
-        &mut self,
+        this: Pin<&GdCell<Self>>,
         method: StringName,
         args: &[&Variant],
     ) -> Result<Variant, sys::GDExtensionCallErrorType> {
@@ -134,55 +158,83 @@ impl ScriptInstance for TestScriptInstance {
                 let arg_a = args[0].to::<GString>();
                 let arg_b = args[1].to::<i32>();
 
-                Ok(format!("{arg_a}{arg_b}").to_variant())
+                Ok(this
+                    .borrow()
+                    .unwrap()
+                    .script_method_a(arg_a, arg_b)
+                    .to_variant())
+            }
+
+            "script_method_toggle_property_b" => {
+                let result = this.borrow_mut().unwrap().script_method_toggle_property_b();
+
+                Ok(result.to_variant())
+            }
+
+            "script_method_re_entering" => {
+                let mut guard = this.borrow_mut().unwrap();
+                let mut owner = guard.owner();
+
+                let inaccessible = this.make_inaccessible(&mut guard).unwrap();
+
+                let result = owner.call("script_method_toggle_property_b".into(), &[]);
+
+                drop(inaccessible);
+                Ok(result)
             }
 
             _ => Err(sys::GDEXTENSION_CALL_ERROR_INVALID_METHOD),
         }
     }
 
-    fn is_placeholder(&self) -> bool {
+    fn is_placeholder(_this: Pin<&GdCell<Self>>) -> bool {
         panic!("is_placeholder is not implemented")
     }
 
-    fn has_method(&self, method: StringName) -> bool {
+    fn has_method(_this: Pin<&GdCell<Self>>, method: StringName) -> bool {
         matches!(method.to_string().as_str(), "script_method_a")
     }
 
-    fn get_script(&self) -> &Gd<Script> {
-        &self.script
+    fn get_script(this: Pin<&GdCell<Self>>) -> Gd<Script> {
+        let guard = this.borrow().unwrap();
+
+        guard.script.clone()
     }
 
-    fn get_property_type(&self, name: StringName) -> VariantType {
+    fn get_property_type(_this: Pin<&GdCell<Self>>, name: StringName) -> VariantType {
         match name.to_string().as_str() {
             "script_property_a" => VariantType::Int,
             _ => VariantType::Nil,
         }
     }
 
-    fn to_string(&self) -> GString {
+    fn to_string(_this: Pin<&GdCell<Self>>) -> GString {
         GString::from("script instance to string")
     }
 
-    fn get_property_state(&self) -> Vec<(StringName, Variant)> {
+    fn get_property_state(_this: Pin<&GdCell<Self>>) -> Vec<(StringName, Variant)> {
         panic!("property_state is not implemented")
     }
 
-    fn get_language(&self) -> Gd<ScriptLanguage> {
+    fn get_language(_this: Pin<&GdCell<Self>>) -> Gd<ScriptLanguage> {
         panic!("language is not implemented")
     }
 
-    fn on_refcount_decremented(&self) -> bool {
+    fn on_refcount_decremented(_this: Pin<&GdCell<Self>>) -> bool {
         true
     }
 
-    fn on_refcount_incremented(&self) {}
+    fn on_refcount_incremented(_this: Pin<&GdCell<Self>>) {}
 
-    fn property_get_fallback(&self, _name: StringName) -> Option<Variant> {
+    fn property_get_fallback(_this: Pin<&GdCell<Self>>, _name: StringName) -> Option<Variant> {
         None
     }
 
-    fn property_set_fallback(&mut self, _name: StringName, _value: &Variant) -> bool {
+    fn property_set_fallback(
+        _this: Pin<&GdCell<Self>>,
+        _name: StringName,
+        _value: &Variant,
+    ) -> bool {
         false
     }
 }

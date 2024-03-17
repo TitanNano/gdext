@@ -178,6 +178,7 @@
 //! Please refrain from using undocumented and private features; if you are missing certain functionality, bring it up for discussion instead.
 //! This allows us to decide whether it fits the scope of the library and to design proper APIs for it.
 
+pub use godot_cell::{GdCell, RefGuard};
 #[doc(inline)]
 pub use godot_core::{builtin, engine, log, obj};
 
