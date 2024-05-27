@@ -9,9 +9,11 @@ categories = ["game-engines", "graphics"]
 
 [features]
 proptest = ["dep:proptest"]
+threads = ["dep:parking_lot"]
 
 [dependencies]
 proptest = { version = "1.4.0", optional = true }
+parking_lot = { version = "0.12", optional = true }
 
 # https://docs.rs/about/metadata
 [package.metadata.docs.rs]

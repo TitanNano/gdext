@@ -28,6 +28,10 @@ pub struct BorrowState {
     inaccessible_count: usize,
     /// `true` if the borrow state has reached an erroneous or unreliable state.
     poisoned: bool,
+
+    /// Tracks the number of shared references per thread.
+    #[cfg(feature = "threads")]
+    thread_shared_count: std::collections::HashMap<std::thread::ThreadId, usize>,
 }
 
 impl BorrowState {
@@ -38,6 +42,8 @@ impl BorrowState {
             mut_count: 0,
             inaccessible_count: 0,
             poisoned: false,
+            #[cfg(feature = "threads")]
+            thread_shared_count: std::collections::HashMap::default(),
         }
     }
 
@@ -58,6 +64,15 @@ impl BorrowState {
     /// Any amount of shared references will prevent [`Self::increment_mut`] from succeeding.
     pub fn shared_count(&self) -> usize {
         self.shared_count
+    }
+
+    /// Returns the number of tracked shared references in the current thread.
+    #[cfg(feature = "threads")]
+    pub fn thread_shared_count(&self) -> usize {
+        *self
+            .thread_shared_count
+            .get(&std::thread::current().id())
+            .unwrap_or(&0usize)
     }
 
     /// Returns the number of tracked mutable references.
@@ -128,6 +143,14 @@ impl BorrowState {
             .checked_add(1)
             .ok_or("could not increment shared count")?;
 
+        #[cfg(feature = "threads")]
+        self.thread_shared_count
+            .entry(std::thread::current().id())
+            .and_modify(|count| {
+                *count += 1;
+            })
+            .or_insert(1);
+
         Ok(self.shared_count)
     }
 
@@ -150,6 +173,11 @@ impl BorrowState {
 
         // We know `shared_count` isn't 0.
         self.shared_count -= 1;
+
+        #[cfg(feature = "threads")]
+        self.thread_shared_count
+            .entry(std::thread::current().id())
+            .and_modify(|count| *count -= 1);
 
         Ok(self.shared_count)
     }

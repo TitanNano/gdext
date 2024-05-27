@@ -9,6 +9,12 @@ use std::ops::{Deref, DerefMut};
 use std::ptr::NonNull;
 use std::sync::{Mutex, MutexGuard};
 
+#[cfg(feature = "threads")]
+use std::thread::ThreadId;
+
+#[cfg(feature = "threads")]
+use parking_lot::RwLockReadGuard;
+
 use crate::CellState;
 
 // ----------------------------------------------------------------------------------------------------------------------------------------------
@@ -23,6 +29,10 @@ pub struct RefGuard<'a, T> {
 
     /// A pointer to the borrowed value.
     value: NonNull<T>,
+
+    /// The read lock is never used and only being held to block other threads from acquiring a write lock.
+    #[cfg(feature = "threads")]
+    _thread_read_lock: RwLockReadGuard<'a, ThreadId>,
 }
 
 impl<'a, T> RefGuard<'a, T> {
@@ -40,8 +50,17 @@ impl<'a, T> RefGuard<'a, T> {
     ///
     /// These conditions ensure that it is safe to call [`as_ref()`](NonNull::as_ref) on `value` for as long
     /// as the returned guard exists.
-    pub(crate) unsafe fn new(state: &'a Mutex<CellState<T>>, value: NonNull<T>) -> Self {
-        Self { state, value }
+    pub(crate) unsafe fn new(
+        state: &'a Mutex<CellState<T>>,
+        value: NonNull<T>,
+        #[cfg(feature = "threads")] thread_read_lock: RwLockReadGuard<'a, ThreadId>,
+    ) -> Self {
+        Self {
+            state,
+            value,
+            #[cfg(feature = "threads")]
+            _thread_read_lock: thread_read_lock,
+        }
     }
 }
 
@@ -77,6 +96,9 @@ pub struct MutGuard<'a, T> {
     state: &'a Mutex<CellState<T>>,
     count: usize,
     value: NonNull<T>,
+    /// The read lock is never used and only being held to block other threads from acquiring a write lock.
+    #[cfg(feature = "threads")]
+    _thread_read_lock: RwLockReadGuard<'a, ThreadId>,
 }
 
 impl<'a, T> MutGuard<'a, T> {
@@ -113,11 +135,14 @@ impl<'a, T> MutGuard<'a, T> {
         state: &'a Mutex<CellState<T>>,
         count: usize,
         value: NonNull<T>,
+        #[cfg(feature = "threads")] thread_read_lock: RwLockReadGuard<'a, ThreadId>,
     ) -> Self {
         Self {
             state,
             count,
             value,
+            #[cfg(feature = "threads")]
+            _thread_read_lock: thread_read_lock,
         }
     }
 }

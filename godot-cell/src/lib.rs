@@ -33,6 +33,9 @@ use std::pin::Pin;
 use std::ptr::NonNull;
 use std::sync::Mutex;
 
+#[cfg(feature = "threads")]
+use parking_lot::{RwLock, RwLockReadGuard, RwLockWriteGuard};
+
 use borrow_state::BorrowState;
 pub use guards::{InaccessibleGuard, MutGuard, RefGuard};
 
@@ -50,6 +53,9 @@ pub struct GdCell<T> {
     value: UnsafeCell<T>,
     /// We don't want to be able to take `GdCell` out of a pin, so `GdCell` cannot implement `Unpin`.
     _pin: PhantomPinned,
+    /// Thread ID of the thread that currently holds the mutable reference.
+    #[cfg(feature = "threads")]
+    mut_thread: RwLock<std::thread::ThreadId>,
 }
 
 impl<T> GdCell<T> {
@@ -59,6 +65,8 @@ impl<T> GdCell<T> {
             state: Mutex::new(CellState::new()),
             value: UnsafeCell::new(value),
             _pin: PhantomPinned,
+            #[cfg(feature = "threads")]
+            mut_thread: RwLock::new(std::thread::current().id()),
         });
 
         cell.state.lock().unwrap().initialize_ptr(&cell.value);
@@ -69,19 +77,62 @@ impl<T> GdCell<T> {
     /// Returns a new shared reference to the contents of the cell.
     ///
     /// Fails if an accessible mutable reference exists.
+    ///
+    /// Blocks if an other thread currently holds a mutable reference.
     pub fn borrow(self: Pin<&Self>) -> Result<RefGuard<'_, T>, Box<dyn Error>> {
+        #[cfg(feature = "threads")]
+        let read_lock = {
+            let mut_thread_id = self.get_ref().mut_thread.read_recursive();
+            let shared_count = self.state.lock().unwrap().borrow_state.shared_count();
+
+            // If there is already a shared reference, we don't need to care about the thread ID.
+            if shared_count > 0 {
+                mut_thread_id
+            } else {
+                self.get_ref().claim_mut_thread(mut_thread_id)
+            }
+        };
+
         let mut state = self.state.lock().unwrap();
         state.borrow_state.increment_shared()?;
 
         // SAFETY: `increment_shared` succeeded, therefore there cannot currently be any accessible mutable
         // references.
-        unsafe { Ok(RefGuard::new(&self.get_ref().state, state.get_ptr())) }
+        unsafe {
+            Ok(RefGuard::new(
+                &self.get_ref().state,
+                state.get_ptr(),
+                // We maintain the read lock until the reference is dropped, blocking other threads from updating the thread ID.
+                #[cfg(feature = "threads")]
+                read_lock,
+            ))
+        }
     }
 
     /// Returns a new mutable reference to the contents of the cell.
     ///
     /// Fails if an accessible mutable reference exists, or a shared reference exists.
+    ///
+    /// Blocks if an other thread currently holds a mutable reference, or if other threads hold immutable references but the current thread
+    /// doesn't.
     pub fn borrow_mut(self: Pin<&Self>) -> Result<MutGuard<'_, T>, Box<dyn Error>> {
+        #[cfg(feature = "threads")]
+        let read_lock = {
+            let mut_thread_id = self.get_ref().mut_thread.read_recursive();
+            let thread_shared_count = self
+                .state
+                .lock()
+                .unwrap()
+                .borrow_state
+                .thread_shared_count();
+
+            if thread_shared_count > 0 {
+                mut_thread_id
+            } else {
+                self.get_ref().claim_mut_thread(mut_thread_id)
+            }
+        };
+
         let mut state = self.state.lock().unwrap();
         state.borrow_state.increment_mut()?;
         let count = state.borrow_state.mut_count();
@@ -98,7 +149,16 @@ impl<T> GdCell<T> {
         // If `make_inaccessible` is called and succeeds, then a mutable reference from this guard is passed
         // in. In which case, we cannot use this guard again until the resulting inaccessible guard is
         // dropped.
-        unsafe { Ok(MutGuard::new(&self.get_ref().state, count, value)) }
+        unsafe {
+            Ok(MutGuard::new(
+                &self.get_ref().state,
+                count,
+                value,
+                // We maintain the read lock until the reference is dropped, blocking other threads from updating the thread id.
+                #[cfg(feature = "threads")]
+                read_lock,
+            ))
+        }
     }
 
     /// Make the current mutable borrow inaccessible, thus freeing the value up to be reborrowed again.
@@ -127,6 +187,37 @@ impl<T> GdCell<T> {
         let state = self.state.lock().unwrap();
 
         state.borrow_state.shared_count() > 0 || state.borrow_state.mut_count() > 0
+    }
+
+    /// Claims the mutable reference for the current thread, blocking if any shared or mutable guards are currently active.
+    ///
+    /// The [`RwLock`] is used to synchronize multiple threads by blocking them and allowing each thread a chance to obtain a reference that is
+    /// currently held by another thread, without causing a panic.
+    ///
+    /// We can block a thread by issuing read locks to all [`RefGuard`] and [`MutGuard`]. Once all read locks have been released, the write
+    /// lock is granted, allowing the thread ID for the mutable reference to be updated. After the change has been made, the lock will be
+    /// downgraded to a read lock until the current guard is released. This approach prevents other threads from updating the thread ID,
+    /// avoiding potential panics caused by the existing mutable reference.
+    ///
+    /// Shared references use this method when there is a mutable reference on another thread. Although they don't technically need to claim
+    /// the mutable reference, reusing the same blocking mechanism is convenient.
+    #[cfg(feature = "threads")]
+    fn claim_mut_thread<'g>(
+        &'g self,
+        mut_thread_id: RwLockReadGuard<'g, std::thread::ThreadId>,
+    ) -> RwLockReadGuard<'g, std::thread::ThreadId> {
+        if *mut_thread_id == std::thread::current().id() {
+            mut_thread_id
+        } else {
+            drop(mut_thread_id);
+
+            let mut mut_thread_id = self.mut_thread.write();
+
+            *mut_thread_id = std::thread::current().id();
+
+            // Get new read lock, so no one can write while we hand out guards.
+            RwLockWriteGuard::downgrade(mut_thread_id)
+        }
     }
 }
 

@@ -218,6 +218,10 @@ impl MyClass {
         unsafe { call_immut_method(self.base.instance_id, Self::immut_method).unwrap() }
     }
 
+    fn immut_calls_mut_directly(&self) {
+        unsafe { call_mut_method(self.base.instance_id, Self::mut_method).unwrap() }
+    }
+
     fn base(&mut self) -> BaseGuard<'_, Self> {
         let cell = self.base.cell();
         BaseGuard::new(self.base.instance_id, cell.make_inaccessible(self).unwrap())
@@ -361,6 +365,9 @@ fn calls_parallel() {
     unsafe {
         assert!(get_int(instance_id) >= min_expected);
         assert!(get_int(instance_id) <= max_expected);
+
+        #[cfg(feature = "threads")]
+        assert!(get_int(instance_id) == max_expected);
     }
 }
 
@@ -397,6 +404,9 @@ fn calls_parallel_many_serial() {
     unsafe {
         assert!(get_int(instance_id) >= min_expected);
         assert!(get_int(instance_id) <= max_expected);
+
+        #[cfg(feature = "threads")]
+        assert!(get_int(instance_id) == max_expected);
     }
 }
 
@@ -433,5 +443,42 @@ fn calls_parallel_many_parallel() {
     unsafe {
         assert!(get_int(instance_id) >= min_expected);
         assert!(get_int(instance_id) <= max_expected);
+
+        #[cfg(feature = "threads")]
+        assert!(get_int(instance_id) == max_expected);
     }
+}
+
+/// Reborrow the same cell on multiple threads.
+///
+/// This verifies that threads don't hang if a reborrow occours inside them, i.e. immutable borrow followed
+/// by a mutable borrow.
+///
+/// Threads should only block if:
+/// a) Thread A holds mutable reference AND thread B holds no references.
+/// b) One or more threads hold shared references AND thread A holds no references
+#[test]
+fn non_blocking_reborrow() {
+    use std::thread;
+    let instance_id = MyClass::init();
+
+    let thread_a = thread::spawn(move || unsafe {
+        // Acquire an immutable reference and then try to also acquire a mutable reference.
+        // This should panic.
+        call_immut_method(instance_id, MyClass::immut_calls_mut_directly).unwrap();
+    });
+
+    let thread_b = thread::spawn(move || unsafe {
+        // Do the same thing as the other thread. This should not block, but panic. Shared and mutable references in the same thread
+        // are not possible.
+        call_immut_method(instance_id, MyClass::immut_calls_mut_directly).unwrap();
+    });
+
+    let panic_a = thread_a.join().err();
+
+    assert_eq!(panic_a.unwrap().downcast_ref::<String>().unwrap(), "called `Result::unwrap()` on an `Err` value: Custom(\"cannot borrow mutable while shared borrow exists\")");
+
+    let panic_b = thread_b.join().err();
+
+    assert_eq!(panic_b.unwrap().downcast_ref::<String>().unwrap(), "called `Result::unwrap()` on an `Err` value: Custom(\"cannot borrow mutable while shared borrow exists\")");
 }
