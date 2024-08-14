@@ -10,10 +10,12 @@
 //! Contains functionality that extends existing Godot classes and functions, to make them more versatile
 //! or better integrated with Rust.
 
+mod async_support;
 mod gfile;
 mod save_load;
 mod translate;
 
+pub use async_support::*;
 pub use gfile::*;
 pub use save_load::*;
 pub use translate::*;
