@@ -25,7 +25,20 @@ fn start_async_task() {
     godot_print!("starting godot_task...");
     godot_task(async move {
         godot_print!("running async task...");
-        let result = call_async_fn(signal).await;
+
+        godot_print!("starting nested task...");
+
+        let inner_signal = signal.clone();
+        godot_task(async move {
+            godot_print!("inside nested task...");
+
+            let _: () = inner_signal.to_future().await;
+
+            godot_print!("nested task after await...");
+            godot_print!("nested task done!");
+        });
+
+        let result = call_async_fn(signal.clone()).await;
         godot_print!("got async result...");
 
         assert_eq!(result, 10);
