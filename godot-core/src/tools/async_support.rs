@@ -3,17 +3,32 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
+use std::thread::{self, ThreadId};
 
 use crate::builtin::{Callable, Signal, Variant};
 use crate::classes::object::ConnectFlags;
+use crate::classes::Os;
 use crate::godot_error;
-use crate::meta::FromGodot;
+use crate::meta::{FromGodot, ToGodot};
 use crate::obj::EngineEnum;
 
 pub fn godot_task(future: impl Future<Output = ()> + 'static) {
+    let os = Os::singleton();
+
+    // Spawning new tasks is only allowed on the main thread for now.
+    // We can not accept Sync + Send futures since all object references (i.e. Gd<T>) are not thread-safe. So a future has to remain on the
+    // same thread it was created on. Godots signals on the other hand can be emitted on any thread, so it can't be guaranteed on which thread
+    // a future will be polled.
+    // By limiting async tasks to the main thread we can redirect all signal callbacks back to the main thread via `call_deferred`.
+    //
+    // Once thread-safe futures are possible the restriction can be lifted.
+    if os.get_thread_caller_id() != os.get_main_thread_id() {
+        return;
+    }
+
     let waker: Waker = ASYNC_RUNTIME.with_borrow_mut(move |rt| {
         let task_index = rt.add_task(Box::pin(future));
-        Arc::new(GodotWaker::new(task_index)).into()
+        Arc::new(GodotWaker::new(task_index, thread::current().id())).into()
     });
 
     waker.wake();
@@ -71,39 +86,56 @@ impl AsyncRuntime {
 
 struct GodotWaker {
     runtime_index: usize,
+    thread_id: ThreadId,
 }
 
 impl GodotWaker {
-    fn new(index: usize) -> Self {
+    fn new(index: usize, thread_id: ThreadId) -> Self {
         Self {
             runtime_index: index,
+            thread_id,
         }
     }
 }
 
 impl Wake for GodotWaker {
     fn wake(self: std::sync::Arc<Self>) {
-        let waker: Waker = self.clone().into();
-        let mut ctx = Context::from_waker(&waker);
+        let callable = Callable::from_fn("GodotWaker::wake", move |_args| {
+            let waker: Waker = self.clone().into();
+            let mut ctx = Context::from_waker(&waker);
 
-        ASYNC_RUNTIME.with_borrow_mut(|rt| {
-            let Some(future) = rt.get_task(self.runtime_index) else {
-                godot_error!("Future no longer exists! This is a bug!");
-                return;
-            };
+            ASYNC_RUNTIME.with_borrow_mut(|rt| {
+                let current_thread = thread::current().id();
 
-            // this does currently not support nested tasks.
-            let result = future.poll(&mut ctx);
-            match result {
-                Poll::Pending => (),
-                Poll::Ready(()) => rt.clear_task(self.runtime_index),
-            }
+                if self.thread_id != current_thread {
+                    panic!("trying to poll future on a different thread!\nCurrent Thread: {:?}, Future Thread: {:?}", current_thread, self.thread_id);
+                }
+
+                let Some(future) = rt.get_task(self.runtime_index) else {
+                    godot_error!("Future no longer exists! This is a bug!");
+                    return;
+                };
+
+                // this does currently not support nested tasks.
+                let result = future.poll(&mut ctx);
+                match result {
+                    Poll::Pending => (),
+                    Poll::Ready(()) => rt.clear_task(self.runtime_index),
+                }
+            });
+
+            Ok(Variant::nil())
         });
+
+        // shedule waker to poll the future on the end of the frame.
+        callable.to_variant().call("call_deferred", &[]);
     }
 }
 
 pub struct SignalFuture<R: FromSignalArgs> {
     state: Arc<Mutex<(Option<R>, Option<Waker>)>>,
+    callable: Callable,
+    signal: Signal,
 }
 
 impl<R: FromSignalArgs> SignalFuture<R> {
@@ -112,24 +144,27 @@ impl<R: FromSignalArgs> SignalFuture<R> {
         let callback_state = state.clone();
 
         // the callable currently requires that the return value is Sync + Send
-        signal.connect(
-            Callable::from_fn("async_task", move |args: &[&Variant]| {
-                let mut lock = callback_state.lock().unwrap();
-                let waker = lock.1.take();
+        let callable = Callable::from_fn("async_task", move |args: &[&Variant]| {
+            let mut lock = callback_state.lock().unwrap();
+            let waker = lock.1.take();
 
-                lock.0.replace(R::from_args(args));
-                drop(lock);
+            lock.0.replace(R::from_args(args));
+            drop(lock);
 
-                if let Some(waker) = waker {
-                    waker.wake();
-                }
+            if let Some(waker) = waker {
+                waker.wake();
+            }
 
-                Ok(Variant::nil())
-            }),
-            ConnectFlags::ONE_SHOT.ord() as i64,
-        );
+            Ok(Variant::nil())
+        });
 
-        Self { state }
+        signal.connect(callable.clone(), ConnectFlags::ONE_SHOT.ord() as i64);
+
+        Self {
+            state,
+            callable,
+            signal,
+        }
     }
 }
 
@@ -146,6 +181,16 @@ impl<R: FromSignalArgs> Future for SignalFuture<R> {
         lock.1.replace(cx.waker().clone());
 
         Poll::Pending
+    }
+}
+
+impl<R: FromSignalArgs> Drop for SignalFuture<R> {
+    fn drop(&mut self) {
+        if !self.signal.is_connected(self.callable.clone()) {
+            return;
+        }
+
+        self.signal.disconnect(self.callable.clone());
     }
 }
 
