@@ -1,5 +1,6 @@
 use std::cell::RefCell;
 use std::future::Future;
+use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
@@ -8,10 +9,11 @@ use std::thread::{self, ThreadId};
 use crate::builtin::{Callable, Signal, Variant};
 use crate::classes::object::ConnectFlags;
 use crate::classes::Os;
+use crate::godot_warn;
 use crate::meta::{FromGodot, ToGodot};
 use crate::obj::EngineEnum;
 
-pub fn godot_task(future: impl Future<Output = ()> + 'static) {
+pub fn godot_task(future: impl Future<Output = ()> + 'static) -> TaskHandle {
     let os = Os::singleton();
 
     // Spawning new tasks is only allowed on the main thread for now.
@@ -22,71 +24,162 @@ pub fn godot_task(future: impl Future<Output = ()> + 'static) {
     //
     // Once thread-safe futures are possible the restriction can be lifted.
     if os.get_thread_caller_id() != os.get_main_thread_id() {
-        return;
+        panic!("godot_task can only be used on the main thread!");
     }
 
-    let waker: Waker = ASYNC_RUNTIME.with_borrow_mut(move |rt| {
-        let task_index = rt.add_task(Box::pin(future));
-        Arc::new(GodotWaker::new(task_index, thread::current().id())).into()
+    let (task_handle, waker): (_, Waker) = ASYNC_RUNTIME.with_borrow_mut(move |rt| {
+        let task_handle = rt.add_task(Box::pin(future));
+        let waker = Arc::new(GodotWaker::new(
+            task_handle.index,
+            task_handle.id,
+            thread::current().id(),
+        ))
+        .into();
+
+        (task_handle, waker)
     });
 
     waker.wake();
+    task_handle
 }
 
 thread_local! { pub(crate) static ASYNC_RUNTIME: RefCell<AsyncRuntime> = RefCell::new(AsyncRuntime::new()); }
 
 #[derive(Default)]
-enum FutureSlot<T> {
+enum FutureSlotState<T> {
+    /// Slot is currently empty.
     #[default]
     Empty,
+    /// Slot was previously occupied but the future has been canceled or the slot reused.
+    Gone,
+    /// Slot contains a pending future.
     Pending(T),
+    /// slot contains a future which is currently being polled.
     Polling,
 }
 
+struct FutureSlot<T> {
+    value: FutureSlotState<T>,
+    id: u64,
+}
+
 impl<T> FutureSlot<T> {
+    fn pending(id: u64, value: T) -> Self {
+        Self {
+            value: FutureSlotState::Pending(value),
+            id,
+        }
+    }
+
     fn is_empty(&self) -> bool {
-        matches!(self, Self::Empty)
+        matches!(self.value, FutureSlotState::Empty | FutureSlotState::Gone)
     }
 
     fn clear(&mut self) {
-        *self = Self::Empty;
+        self.value = FutureSlotState::Empty;
     }
 
-    fn take(&mut self) -> Self {
-        match self {
-            Self::Empty => Self::Empty,
-            Self::Pending(_) => std::mem::replace(self, Self::Polling),
-            Self::Polling => Self::Polling,
+    fn cancel(&mut self) {
+        self.value = FutureSlotState::Gone;
+    }
+
+    fn take(&mut self, id: u64) -> FutureSlotState<T> {
+        match self.value {
+            FutureSlotState::Empty => FutureSlotState::Empty,
+            FutureSlotState::Polling => FutureSlotState::Polling,
+            FutureSlotState::Gone => FutureSlotState::Gone,
+            FutureSlotState::Pending(_) if self.id != id => FutureSlotState::Gone,
+            FutureSlotState::Pending(_) => {
+                std::mem::replace(&mut self.value, FutureSlotState::Polling)
+            }
         }
     }
 
     fn park(&mut self, value: T) {
-        match self {
-            Self::Empty => {
+        match self.value {
+            FutureSlotState::Empty | FutureSlotState::Gone => {
                 panic!("Future slot is currently unoccupied, future can not be parked here!");
             }
-
-            Self::Pending(_) => panic!("Future slot is already occupied by a different future!"),
-            Self::Polling => {
-                *self = Self::Pending(value);
+            FutureSlotState::Pending(_) => {
+                panic!("Future slot is already occupied by a different future!")
+            }
+            FutureSlotState::Polling => {
+                self.value = FutureSlotState::Pending(value);
             }
         }
+    }
+}
+
+pub struct TaskHandle {
+    index: usize,
+    id: u64,
+    _pd: PhantomData<*const ()>,
+}
+
+impl TaskHandle {
+    fn new(index: usize, id: u64) -> Self {
+        Self {
+            index,
+            id,
+            _pd: PhantomData,
+        }
+    }
+
+    pub fn cancel(self) {
+        ASYNC_RUNTIME.with_borrow_mut(|rt| {
+            let Some(task) = rt.tasks.get(self.index) else {
+                return;
+            };
+
+            let alive = match task.value {
+                FutureSlotState::Empty | FutureSlotState::Gone => false,
+                FutureSlotState::Pending(_) => task.id == self.id,
+                FutureSlotState::Polling => panic!("Can not cancel future from inside it!"),
+            };
+
+            if !alive {
+                return;
+            }
+
+            rt.cancel_task(self.index);
+        })
+    }
+
+    pub fn is_pending(&self) -> bool {
+        ASYNC_RUNTIME.with_borrow(|rt| {
+            let slot = rt.tasks.get(self.index).expect("Slot at index must exist!");
+
+            if slot.id != self.id {
+                return false;
+            }
+
+            matches!(slot.value, FutureSlotState::Pending(_))
+        })
     }
 }
 
 #[derive(Default)]
 pub(crate) struct AsyncRuntime {
     tasks: Vec<FutureSlot<Pin<Box<dyn Future<Output = ()>>>>>,
+    task_counter: u64,
 }
 
 impl AsyncRuntime {
     fn new() -> Self {
         Self {
             tasks: Vec::with_capacity(10),
+            task_counter: 0,
         }
     }
 
-    fn add_task<F: Future<Output = ()> + 'static>(&mut self, future: F) -> usize {
+    fn next_id(&mut self) -> u64 {
+        let id = self.task_counter;
+        self.task_counter += 1;
+        id
+    }
+
+    fn add_task<F: Future<Output = ()> + 'static>(&mut self, future: F) -> TaskHandle {
+        let id = self.next_id();
         let slot = self
             .tasks
             .iter_mut()
@@ -95,33 +188,36 @@ impl AsyncRuntime {
 
         let boxed = Box::pin(future);
 
-        match slot {
+        let index = match slot {
             Some((index, slot)) => {
-                *slot = FutureSlot::Pending(boxed);
+                *slot = FutureSlot::pending(id, boxed);
                 index
             }
             None => {
-                self.tasks.push(FutureSlot::Pending(boxed));
+                self.tasks.push(FutureSlot::pending(id, boxed));
                 self.tasks.len() - 1
             }
-        }
+        };
+
+        TaskHandle::new(index, id)
     }
 
     fn get_task(
         &mut self,
         index: usize,
-    ) -> FutureSlot<Pin<Box<dyn Future<Output = ()> + 'static>>> {
+        id: u64,
+    ) -> FutureSlotState<Pin<Box<dyn Future<Output = ()> + 'static>>> {
         let slot = self.tasks.get_mut(index);
 
-        slot.map(|inner| inner.take()).unwrap_or_default()
+        slot.map(|inner| inner.take(id)).unwrap_or_default()
     }
 
     fn clear_task(&mut self, index: usize) {
-        if index >= self.tasks.len() {
-            return;
-        }
+        self.tasks[index].clear();
+    }
 
-        self.tasks[0].clear();
+    fn cancel_task(&mut self, index: usize) {
+        self.tasks[index].cancel();
     }
 
     fn park_task(&mut self, index: usize, future: Pin<Box<dyn Future<Output = ()>>>) {
@@ -131,14 +227,16 @@ impl AsyncRuntime {
 
 struct GodotWaker {
     runtime_index: usize,
+    task_id: u64,
     thread_id: ThreadId,
 }
 
 impl GodotWaker {
-    fn new(index: usize, thread_id: ThreadId) -> Self {
+    fn new(index: usize, task_id: u64, thread_id: ThreadId) -> Self {
         Self {
             runtime_index: index,
             thread_id,
+            task_id,
         }
     }
 }
@@ -156,19 +254,28 @@ impl Wake for GodotWaker {
             let mut ctx = Context::from_waker(&waker);
 
             // take future out of the runtime.
-            let mut future = ASYNC_RUNTIME.with_borrow_mut(|rt| {
-                match rt.get_task(self.runtime_index) {
-                    FutureSlot::Empty => {
+            let future = ASYNC_RUNTIME.with_borrow_mut(|rt| {
+                match rt.get_task(self.runtime_index, self.task_id) {
+                    FutureSlotState::Empty => {
                         panic!("Future no longer exists when waking it! This is a bug!");
                     },
 
-                    FutureSlot::Polling => {
+                    FutureSlotState::Gone => {
+                        None
+                    }
+
+                    FutureSlotState::Polling => {
                         panic!("The same GodotWaker has been called recursively, this is not expected!");
                     }
 
-                    FutureSlot::Pending(future) => future
+                    FutureSlotState::Pending(future) => Some(future),
                 }
             });
+
+            let Some(mut future) = future else {
+                // future has been canceled while the waker was already triggered.
+                return Ok(Variant::nil());
+            };
 
             let result = future.as_mut().poll(&mut ctx);
 
@@ -241,14 +348,17 @@ impl<R: FromSignalArgs> Future for SignalFuture<R> {
 impl<R: FromSignalArgs> Drop for SignalFuture<R> {
     fn drop(&mut self) {
         if !self.callable.is_valid() {
+            godot_warn!("dropping furure but callable no longer exists!");
             return;
         }
 
         if self.signal.object().is_none() {
+            godot_warn!("dropping furure but signal owner no longer exists!");
             return;
         }
 
         if self.signal.is_connected(self.callable.clone()) {
+            godot_warn!("dropping furure but signal still connected!");
             self.signal.disconnect(self.callable.clone());
         }
     }

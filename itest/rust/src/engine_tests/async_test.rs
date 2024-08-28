@@ -46,3 +46,23 @@ fn start_async_task() {
     });
     godot_print!("after godot_task...");
 }
+
+#[itest]
+fn cancel_async_task() {
+    let tree = Engine::singleton()
+        .get_main_loop()
+        .unwrap()
+        .cast::<SceneTree>();
+
+    let signal = Signal::from_object_signal(&tree, "process_frame");
+
+    let handle = godot_task(async move {
+        godot_print!("starting task to be canceled...");
+
+        let _: () = signal.to_future().await;
+
+        unreachable!();
+    });
+
+    handle.cancel();
+}
