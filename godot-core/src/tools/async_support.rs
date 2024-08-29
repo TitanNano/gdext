@@ -1,4 +1,6 @@
+use std::any::type_name;
 use std::cell::RefCell;
+use std::fmt::{Debug, Display};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
@@ -6,10 +8,9 @@ use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Wake, Waker};
 use std::thread::{self, ThreadId};
 
-use crate::builtin::{Callable, Signal, Variant};
+use crate::builtin::{Callable, RustCallable, Signal, Variant};
 use crate::classes::object::ConnectFlags;
 use crate::classes::Os;
-use crate::godot_warn;
 use crate::meta::{FromGodot, ToGodot};
 use crate::obj::EngineEnum;
 
@@ -348,18 +349,168 @@ impl<R: FromSignalArgs> Future for SignalFuture<R> {
 impl<R: FromSignalArgs> Drop for SignalFuture<R> {
     fn drop(&mut self) {
         if !self.callable.is_valid() {
-            godot_warn!("dropping furure but callable no longer exists!");
             return;
         }
 
         if self.signal.object().is_none() {
-            godot_warn!("dropping furure but signal owner no longer exists!");
             return;
         }
 
         if self.signal.is_connected(self.callable.clone()) {
-            godot_warn!("dropping furure but signal still connected!");
             self.signal.disconnect(self.callable.clone());
+        }
+    }
+}
+
+struct GuaranteedSignalFutureWaker<R> {
+    state: Arc<Mutex<(GuaranteedSignalFutureState<R>, Option<Waker>)>>,
+}
+
+impl<R> Clone for GuaranteedSignalFutureWaker<R> {
+    fn clone(&self) -> Self {
+        Self {
+            state: self.state.clone(),
+        }
+    }
+}
+
+impl<R> GuaranteedSignalFutureWaker<R> {
+    fn new(state: Arc<Mutex<(GuaranteedSignalFutureState<R>, Option<Waker>)>>) -> Self {
+        Self { state }
+    }
+}
+
+impl<R> std::hash::Hash for GuaranteedSignalFutureWaker<R> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_usize(Arc::as_ptr(&self.state) as usize);
+    }
+}
+
+impl<R> PartialEq for GuaranteedSignalFutureWaker<R> {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.state, &other.state)
+    }
+}
+
+impl<R: FromSignalArgs> RustCallable for GuaranteedSignalFutureWaker<R> {
+    fn invoke(&mut self, args: &[&Variant]) -> Result<Variant, ()> {
+        let mut lock = self.state.lock().unwrap();
+        let waker = lock.1.take();
+
+        lock.0 = GuaranteedSignalFutureState::Ready(R::from_args(args));
+        drop(lock);
+
+        if let Some(waker) = waker {
+            waker.wake();
+        }
+
+        Ok(Variant::nil())
+    }
+}
+
+impl<R> Display for GuaranteedSignalFutureWaker<R> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "SafeCallable::<{}>", type_name::<R>())
+    }
+}
+
+impl<R> Drop for GuaranteedSignalFutureWaker<R> {
+    fn drop(&mut self) {
+        let mut lock = self.state.lock().unwrap();
+
+        if !matches!(lock.0, GuaranteedSignalFutureState::Pending) {
+            return;
+        }
+
+        lock.0 = GuaranteedSignalFutureState::Dead;
+
+        if let Some(ref waker) = lock.1 {
+            waker.wake_by_ref();
+        }
+    }
+}
+
+#[derive(Default)]
+enum GuaranteedSignalFutureState<T> {
+    #[default]
+    Pending,
+    Ready(T),
+    Dead,
+    Dropped,
+}
+
+impl<T> GuaranteedSignalFutureState<T> {
+    fn take(&mut self) -> Self {
+        let new_value = match self {
+            Self::Pending => Self::Pending,
+            Self::Ready(_) | Self::Dead => Self::Dead,
+            Self::Dropped => Self::Dropped,
+        };
+
+        std::mem::replace(self, new_value)
+    }
+}
+
+pub struct GuaranteedSignalFuture<R: FromSignalArgs> {
+    state: Arc<Mutex<(GuaranteedSignalFutureState<R>, Option<Waker>)>>,
+    callable: GuaranteedSignalFutureWaker<R>,
+    signal: Signal,
+}
+
+impl<R: FromSignalArgs + Debug> GuaranteedSignalFuture<R> {
+    fn new(signal: Signal) -> Self {
+        let state = Arc::new(Mutex::new((
+            GuaranteedSignalFutureState::Pending,
+            Option::<Waker>::None,
+        )));
+
+        // the callable currently requires that the return value is Sync + Send
+        let callable = GuaranteedSignalFutureWaker::new(state.clone());
+
+        signal.connect(
+            Callable::from_custom(callable.clone()),
+            ConnectFlags::ONE_SHOT.ord() as i64,
+        );
+
+        Self {
+            state,
+            callable,
+            signal,
+        }
+    }
+}
+
+impl<R: FromSignalArgs> Future for GuaranteedSignalFuture<R> {
+    type Output = Option<R>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let mut lock = self.state.lock().unwrap();
+
+        lock.1.replace(cx.waker().clone());
+
+        let value = lock.0.take();
+
+        match value {
+            GuaranteedSignalFutureState::Pending => Poll::Pending,
+            GuaranteedSignalFutureState::Dropped => unreachable!(),
+            GuaranteedSignalFutureState::Dead => Poll::Ready(None),
+            GuaranteedSignalFutureState::Ready(value) => Poll::Ready(Some(value)),
+        }
+    }
+}
+
+impl<R: FromSignalArgs> Drop for GuaranteedSignalFuture<R> {
+    fn drop(&mut self) {
+        if self.signal.object().is_none() {
+            return;
+        }
+
+        self.state.lock().unwrap().0 = GuaranteedSignalFutureState::Dropped;
+
+        let gd_callable = Callable::from_custom(self.callable.clone());
+
+        if self.signal.is_connected(gd_callable.clone()) {
+            self.signal.disconnect(gd_callable);
         }
     }
 }
@@ -395,5 +546,41 @@ pub trait ToSignalFuture<R: FromSignalArgs> {
 impl<R: FromSignalArgs> ToSignalFuture<R> for Signal {
     fn to_future(&self) -> SignalFuture<R> {
         SignalFuture::new(self.clone())
+    }
+}
+
+pub trait ToGuaranteedSignalFuture<R: FromSignalArgs + Debug> {
+    fn to_guaranteed_future(&self) -> GuaranteedSignalFuture<R>;
+}
+
+impl<R: FromSignalArgs + Debug> ToGuaranteedSignalFuture<R> for Signal {
+    fn to_guaranteed_future(&self) -> GuaranteedSignalFuture<R> {
+        GuaranteedSignalFuture::new(self.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{
+        hash::{DefaultHasher, Hash, Hasher},
+        sync::Arc,
+    };
+
+    use super::GuaranteedSignalFutureWaker;
+
+    #[test]
+    fn guaranteed_future_waker_cloned_hash() {
+        let waker_a = GuaranteedSignalFutureWaker::<u8>::new(Arc::default());
+        let waker_b = waker_a.clone();
+
+        let mut hasher = DefaultHasher::new();
+        waker_a.hash(&mut hasher);
+        let hash_a = hasher.finish();
+
+        let mut hasher = DefaultHasher::new();
+        waker_b.hash(&mut hasher);
+        let hash_b = hasher.finish();
+
+        assert_eq!(hash_a, hash_b);
     }
 }

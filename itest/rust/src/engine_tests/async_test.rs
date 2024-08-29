@@ -1,7 +1,8 @@
 use godot::builtin::Signal;
-use godot::classes::{Engine, SceneTree};
+use godot::classes::{Engine, Object, SceneTree};
 use godot::global::godot_print;
-use godot::tools::{godot_task, ToSignalFuture};
+use godot::obj::NewAlloc;
+use godot::tools::{godot_task, ToGuaranteedSignalFuture, ToSignalFuture};
 
 use crate::framework::itest;
 
@@ -65,4 +66,23 @@ fn cancel_async_task() {
     });
 
     handle.cancel();
+}
+
+#[itest]
+fn async_task_guaranteed_signal_future() {
+    let mut obj = Object::new_alloc();
+
+    let signal = Signal::from_object_signal(&obj, "script_changed");
+
+    godot_task(async move {
+        godot_print!("starting task with guaranteed signal future...");
+
+        let result: Option<()> = signal.to_guaranteed_future().await;
+
+        assert!(result.is_none());
+
+        godot_print!("task asserted!");
+    });
+
+    obj.call_deferred("free".into(), &[]);
 }
